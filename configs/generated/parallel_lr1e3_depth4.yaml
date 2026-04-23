@@ -1,0 +1,14 @@
+include: configs/rfnll_math.yaml
+
+train:
+  condition: rfnll_original_vs_finephrase
+  output_dir: outputs/parallel_lr1e3_depth4
+  max_steps: 200
+  eval_every: 50
+  batch_size: 4
+  grad_accum_steps: 4
+  learning_rate: 0.001
+  warmup_steps: 40
+
+model:
+  num_hidden_layers: 4
