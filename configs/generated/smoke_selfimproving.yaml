@@ -1,0 +1,20 @@
+include: configs/generated/blog_selfimproving_8192.yaml
+
+train:
+  condition: rfnll_rollout_vs_rewrite
+  output_dir: outputs/smoke_selfimproving
+  max_steps: 20
+  eval_every: 10
+  log_every: 5
+  batch_size: 2
+  grad_accum_steps: 1
+  warmup_steps: 5
+
+data:
+  max_examples: 128
+  raw_max_examples: 128
+  max_parquet_files: 2
+  fineweb_max_parquet_files: 1
+  examples_jsonl: data/processed/smoke_selfimproving_examples.jsonl
+  raw_examples_jsonl: data/processed/smoke_selfimproving_raw_examples.jsonl
+  selected_jsonl: data/processed/smoke_selfimproving_selected.jsonl

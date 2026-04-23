@@ -1,0 +1,24 @@
+include: configs/base.yaml
+
+data:
+  examples_jsonl: data/processed/blog8192_examples.jsonl
+  raw_examples_jsonl: data/processed/blog8192_raw_fineweb_examples.jsonl
+  selected_jsonl: data/processed/blog8192_selected_targets_qwen_r3.jsonl
+  max_examples: 8192
+  raw_max_examples: 8192
+  max_parquet_files: 16
+  fineweb_max_parquet_files: 8
+
+train:
+  max_steps: 4000
+  eval_every: 250
+  batch_size: 4
+  grad_accum_steps: 4
+  warmup_steps: 160
+
+selection:
+  judge_repeats: 3
+  judge_temperature: 0.7
+  judge_top_p: 0.6
+  judge_max_tokens: 64
+  judge_retries: 2

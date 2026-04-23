@@ -1,0 +1,15 @@
+include: configs/generated/blog_base_8192.yaml
+
+train:
+  condition: rfnll_original_vs_finephrase
+  output_dir: outputs/blog_rfnll_8192
+  learning_rate: 0.0003
+
+selection:
+  mode: openai
+  candidates:
+    - original
+    - finephrase
+  judge_endpoint: http://127.0.0.1:30000
+  judge_model: qwen-judge
+  prompt_version: quality_v1
