@@ -1,0 +1,78 @@
+project:
+  name: spark-hybrid-rfnll-pretraining
+  seed: 1337
+
+runtime:
+  image: scitrera/dgx-spark-sglang:0.5.9-t5
+  workdir: /workspace
+  hf_home: /hf
+  model_root: /models
+  device: cuda
+  dtype: bfloat16
+  num_workers: 0
+
+data:
+  finephrase_repo_cache: /hf/hub/datasets--HuggingFaceFW--finephrase
+  finephrase_subset: math
+  fineweb_edu_repo_cache: /hf/hub/datasets--HuggingFaceFW--fineweb-edu
+  fineweb_edu_subset: sample/10BT
+  tokenizer_repo_cache: /hf/hub/models--Qwen--Qwen3-0.6B
+  config_repo_cache: /hf/hub/models--Qwen--Qwen3-0.6B
+  processed_dir: data/processed
+  examples_jsonl: data/processed/examples.jsonl
+  raw_examples_jsonl: data/processed/raw_fineweb_examples.jsonl
+  selected_jsonl: data/processed/selected_targets_openai_judge.jsonl
+  max_examples: 2048
+  raw_max_examples: 2048
+  val_fraction: 0.05
+  prefix_tokens: 384
+  suffix_tokens: 128
+  min_source_tokens: 640
+  max_parquet_files: 4
+  fineweb_max_parquet_files: 2
+
+model:
+  vocab_size: null
+  hidden_size: 512
+  intermediate_size: 1536
+  num_hidden_layers: 6
+  num_attention_heads: 8
+  num_key_value_heads: 2
+  max_position_embeddings: 1024
+  tie_word_embeddings: true
+
+train:
+  condition: rfnll_original_vs_finephrase
+  output_dir: outputs/rfnll_math
+  max_steps: 200
+  eval_every: 50
+  save_every: 0
+  batch_size: 4
+  grad_accum_steps: 4
+  learning_rate: 0.0003
+  weight_decay: 0.1
+  warmup_steps: 40
+  max_grad_norm: 1.0
+  log_every: 10
+  generation_eval_examples: 8
+
+selection:
+  mode: openai
+  candidates:
+    - original
+    - finephrase
+  judge_endpoint: http://127.0.0.1:30000
+  judge_model: qwen-judge
+  prompt_path: prompts/judge_quality.txt
+  prompt_version: quality_v1
+  judge_repeats: 3
+  judge_temperature: 0.7
+  judge_top_p: 0.6
+  judge_max_tokens: 64
+  judge_retries: 2
+
+keep_rule:
+  max_raw_loss_regression: 0.05
+  min_judge_win_abs_gain: 0.03
+  max_repetition_relative_regression: 0.25
+  min_available_mem_gib: 4.0

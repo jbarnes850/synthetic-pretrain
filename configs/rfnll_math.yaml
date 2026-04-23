@@ -1,0 +1,20 @@
+include: configs/base.yaml
+
+train:
+  condition: rfnll_original_vs_finephrase
+  output_dir: outputs/rfnll_math
+  max_steps: 1000
+  eval_every: 100
+  batch_size: 4
+  grad_accum_steps: 4
+  learning_rate: 0.0003
+  warmup_steps: 40
+
+selection:
+  mode: openai
+  candidates:
+    - original
+    - finephrase
+  judge_endpoint: http://127.0.0.1:30000
+  judge_model: qwen-judge
+  prompt_version: quality_v1

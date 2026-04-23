@@ -1,0 +1,14 @@
+include: configs/rfnll_math.yaml
+
+data:
+  selected_jsonl: data/processed/selected_targets_openai_judge.jsonl
+  max_examples: 256
+  max_parquet_files: 1
+
+selection:
+  mode: openai
+  judge_endpoint: http://127.0.0.1:30000
+  judge_model: qwen-judge
+  prompt_path: prompts/judge_quality.txt
+  prompt_version: quality_v1
+  judge_repeats: 1

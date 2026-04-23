@@ -1,0 +1,17 @@
+include: configs/base.yaml
+
+train:
+  condition: raw_ntp
+  output_dir: outputs/baseline_raw
+  max_steps: 1000
+  eval_every: 100
+  batch_size: 4
+  grad_accum_steps: 4
+  learning_rate: 0.0003
+  warmup_steps: 40
+
+selection:
+  mode: fixed
+  fixed_choice: original
+  candidates:
+    - original
