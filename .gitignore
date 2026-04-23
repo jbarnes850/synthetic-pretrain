@@ -1,0 +1,19 @@
+# Runtime state (excluded from repo)
+data/
+outputs/
+logs/
+workers/
+queue/
+locks/
+results.json
+results.json.pre-judge-*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.ruff_cache/
+
+# Logs
+*.log
