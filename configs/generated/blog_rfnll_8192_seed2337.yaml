@@ -1,5 +1,0 @@
-include: configs/generated/blog_rfnll_8192.yaml
-project:
-  seed: 2337
-train:
-  output_dir: outputs/blog_rfnll_8192_seed2337

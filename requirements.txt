@@ -1,0 +1,6 @@
+numpy
+pyarrow
+pyyaml
+requests
+torch
+transformers

@@ -1,5 +1,0 @@
-include: configs/generated/blog_raw_8192.yaml
-project:
-  seed: 2337
-train:
-  output_dir: outputs/blog_raw_8192_seed2337

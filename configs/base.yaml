@@ -1,5 +1,5 @@
 project:
-  name: spark-hybrid-rfnll-pretraining
+  name: self-improving-thinking-midtraining
   seed: 1337
 
 runtime:
@@ -43,7 +43,7 @@ model:
 
 train:
   condition: rfnll_original_vs_finephrase
-  output_dir: outputs/rfnll_math
+  output_dir: outputs/reward_filtered_nll
   max_steps: 200
   eval_every: 50
   save_every: 0

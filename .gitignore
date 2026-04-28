@@ -5,6 +5,8 @@ logs/
 workers/
 queue/
 locks/
+tmp/
+release/
 results.json
 results.json.pre-judge-*
 

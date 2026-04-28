@@ -9,22 +9,21 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, Dataset
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
-
 from common import emit_metric, jsonl_iter, latest_snapshot, load_config, read_available_mem_gib, safe_mean, set_seed
-from online_dpo import (
-    _suffix_logprobs_from_logits,
-    build_online_dpo_batch,
-    compute_dpo_loss,
-    load_ref_model,
-)
 from self_improving import (
     build_rollout_vs_rewrite_batch,
     collate_rollout_raw,
     load_prompt_template,
 )
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader, Dataset
+from train_dpo import (
+    _suffix_logprobs_from_logits,
+    build_online_dpo_batch,
+    compute_dpo_loss,
+    load_ref_model,
+)
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
 
 def cosine_with_floor_schedule(
@@ -57,16 +56,30 @@ class SuffixDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         row = self.rows[idx]
-        prefix = row["prefix_ids"]
         if self.condition == "raw_ntp":
+            prefix = row["prefix_ids"]
             suffix = row["original_suffix_ids"]
             chosen = "original"
         elif self.condition == "finephrase_math_ntp":
+            prefix = row["prefix_ids"]
             suffix = row["finephrase_suffix_ids"]
             chosen = "finephrase"
         elif self.condition == "rfnll_original_vs_finephrase":
+            prefix = row["prefix_ids"]
             suffix = row["chosen_suffix_ids"]
             chosen = row.get("chosen", "selected")
+        elif self.condition == "thinking_sft":
+            prefix = row["prefix_ids"]
+            suffix = row["thinking_suffix_ids"]
+            chosen = "thinking"
+        elif self.condition == "interleaved_thinking_sft":
+            prefix = []
+            suffix = row["interleaved_thinking_ids"]
+            chosen = "interleaved_thinking"
+        elif self.condition == "raw_chunk_ntp":
+            prefix = []
+            suffix = row["raw_chunk_ids"]
+            chosen = "raw_chunk"
         elif self.condition == "rfnll_rollout_vs_rewrite":
             return {
                 "prefix_ids": list(row["prefix_ids"]),
@@ -118,6 +131,12 @@ def load_rows(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         path = cfg["data"]["examples_jsonl"]
     elif condition == "rfnll_original_vs_finephrase":
         path = cfg["data"]["selected_jsonl"]
+    elif condition == "thinking_sft":
+        path = cfg["data"].get("thinking_examples_jsonl", cfg["data"]["examples_jsonl"])
+    elif condition == "interleaved_thinking_sft":
+        path = cfg["data"].get("interleaved_thinking_examples_jsonl", cfg["data"]["examples_jsonl"])
+    elif condition == "raw_chunk_ntp":
+        path = cfg["data"].get("interleaved_thinking_examples_jsonl", cfg["data"]["examples_jsonl"])
     elif condition == "rfnll_rollout_vs_rewrite":
         path = cfg["data"]["examples_jsonl"]
     elif condition == "online_dpo_selfimproving":
@@ -140,7 +159,7 @@ def build_model(cfg: dict[str, Any], tokenizer) -> torch.nn.Module:
         except Exception as e:
             print(f"warning: could not configure SDP backends: {e}", flush=True)
 
-    # Path A: continual pretraining from a public HF checkpoint (Phase 3).
+    # Path A: continual pretraining from a public HF checkpoint.
     # Loads native architecture + pretrained weights in one call. cfg.model
     # dimension overrides are ignored — the pretrained weights dictate shape.
     init_from_pretrained = cfg["train"].get("init_from_pretrained")
@@ -337,6 +356,11 @@ def main() -> None:
     if init_from_pretrained:
         if is_main:
             print(f"loaded pretrained base from {init_from_pretrained}", flush=True)
+        if init_ckpt:
+            state = torch.load(init_ckpt, map_location=device)
+            model.load_state_dict(state, strict=True)
+            if is_main:
+                print(f"loaded checkpoint over pretrained architecture from {init_ckpt}", flush=True)
     elif init_ckpt:
         state = torch.load(init_ckpt, map_location=device)
         model.load_state_dict(state, strict=True)
@@ -607,7 +631,8 @@ def main() -> None:
     raw_cfg = dict(cfg)
     raw_cfg["train"] = dict(cfg["train"])
     raw_cfg["train"]["condition"] = "raw_ntp"
-    raw_val = SuffixDataset(oracle_val_rows, "raw_ntp")
+    raw_condition = "raw_chunk_ntp" if oracle_val_rows and "raw_chunk_ids" in oracle_val_rows[0] else "raw_ntp"
+    raw_val = SuffixDataset(oracle_val_rows, raw_condition)
     raw_loader = DataLoader(raw_val, batch_size=int(cfg["train"]["batch_size"]), shuffle=False, collate_fn=lambda b: pad_batch(b, pad_id))
     val_loss_raw, _ = evaluate(eval_model, raw_loader, device)
 
@@ -619,6 +644,12 @@ def main() -> None:
             suffixes.append(r["finephrase_suffix_ids"])
         elif condition == "rfnll_original_vs_finephrase":
             suffixes.append(r["chosen_suffix_ids"])
+        elif condition == "thinking_sft":
+            suffixes.append(r["thinking_suffix_ids"])
+        elif condition == "interleaved_thinking_sft":
+            suffixes.append(r["interleaved_thinking_ids"])
+        elif condition == "raw_chunk_ntp":
+            suffixes.append(r["raw_chunk_ids"])
         elif condition == "rfnll_rollout_vs_rewrite":
             suffixes.append(r["original_suffix_ids"])
         elif condition == "online_dpo_selfimproving":
