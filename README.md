@@ -40,6 +40,9 @@ scripts/
   train_rlmt.py                     Small RLMT loop
   eval_*.py                         Continuation, thinking, reward, and reasoning evals
   probe_thought_use.py              Causal thought-use intervention
+  counterfactual_thought_bank_sglang.py
+                                    SGLang thought counterfactual bank
+  compare_thought_selectors.py      Selector diagnostic over oracle@16 thought bank
   export_model.py                   Export a checkpoint as a Hugging Face model directory
 
 docs/
@@ -60,6 +63,8 @@ Large artifacts are intentionally not stored in this code repository. The model 
 | Thought-use probe | Swapped thoughts reduced reward to 0.016-0.023 | Thought text became a causal behavioral control surface |
 
 The downstream reasoning evaluation was mixed. This is a 0.6B model with a short 200-step RLMT run, so the right claim is narrow: the lifecycle is trainable at small scale, and the thought channel becomes behaviorally meaningful, but the model does not learn a mature agentic reasoning policy.
+
+A follow-up failure-localization diagnostic sharpened the thought-use result. Teacher thoughts improved reward in three of four arms, most clearly for the base RLMT lineage (`0.117` teacher-thought reward versus `0.016` own-sampled-thought reward). An oracle@16 over sampled model thoughts showed headroom, reaching `0.375` on the self-improved RLMT lineage, but a prefix-only LLM selector and a simple format heuristic failed to recover that headroom (`0.008` macro reward versus `0.021` random expected and `0.250` oracle@16). The interpretation is that the thought channel is real, but the 0.6B policy does not reliably author clean, policy-useful thoughts for itself.
 
 ## Setup
 
@@ -117,6 +122,8 @@ The exact public model and dataset are available from the Hugging Face links abo
 This repository supports the blog's cautious claim: pretraining-style text can be wrapped into continuation selection, interleaved thought insertion, and thought-conditioned reward tasks before agentic post-training.
 
 It does not support broad claims about mature reasoning, production assistant behavior, or general RLMT scaling. The thought-use probe shows causal sensitivity to thought content, while also showing that sampled thoughts are not yet reliably better than blank or generic scaffolds at this scale.
+
+The counterfactual thought-bank and selector diagnostics reinforce that boundary: useful thoughts sometimes exist in the sampled distribution, but their usefulness is not recoverable from surface thought quality or prefix relevance alone.
 
 ## Citation
 
