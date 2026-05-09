@@ -13,6 +13,8 @@ This repo keeps one canonical run path:
 7. Run the reward-variance gate before RLMT.
 8. Run RLMT only if the gate has enough per-prefix reward variance.
 9. Run causal thought probes and reasoning evals.
+10. Run selector ablations on the scored thought bank, including oracle@16 as
+    a diagnostic upper bound only.
 
 The rewrite candidate pool is an ablation, not the default. Rewrites can test
 whether stronger-teacher continuations improve selection pressure, but they must

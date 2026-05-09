@@ -149,13 +149,25 @@ case "${STAGE}" in
   causal-probe)
     "${docker_base[@]}" python3 scripts/counterfactual_thought_bank_sglang.py \
       --arm "${ARM}" \
-	      --model-endpoint "${MODEL_ENDPOINT}" --model-name "${MODEL_NAME}" \
-	      --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
-	      --num-prefixes "${PROBE_PREFIXES:-128}" --samples-per-prefix 16 \
-	      --conditions normal_model_thought teacher_thought blank_thought generic_thought same_arm_swapped_thought \
-	      --mark-complete \
-	      --output-dir "outputs/causal_probe/${RUN_ID}/${ARM}" \
-	      2>&1 | tee "logs/${RUN_ID}-causal-probe-${ARM}.log"
+      --model-endpoint "${MODEL_ENDPOINT}" --model-name "${MODEL_NAME}" \
+      --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
+      --num-prefixes "${PROBE_PREFIXES:-128}" --samples-per-prefix 16 \
+      --conditions normal_model_thought teacher_thought blank_thought generic_thought same_arm_swapped_thought \
+      --mark-complete \
+      --output-dir "outputs/causal_probe/${RUN_ID}/${ARM}" \
+      2>&1 | tee "logs/${RUN_ID}-causal-probe-${ARM}.log"
+    ;;
+  selector-ablation)
+    selector_args=()
+    if [[ -n "${SELECTOR_ENDPOINT:-}" ]]; then
+      selector_args+=(--selector-endpoint "${SELECTOR_ENDPOINT}" --selector-model "${SELECTOR_MODEL:-${JUDGE_MODEL}}")
+    fi
+    "${docker_base[@]}" python3 scripts/compare_thought_selectors.py \
+      --input-dir "${SELECTOR_INPUT_DIR:-outputs/causal_probe/${RUN_ID}/${ARM}}" \
+      --output-dir "outputs/selector_ablation/${RUN_ID}/${ARM}" \
+      --arms "${ARM}" \
+      "${selector_args[@]}" \
+      2>&1 | tee "logs/${RUN_ID}-selector-ablation-${ARM}.log"
     ;;
   reasoning-eval)
     "${docker_base[@]}" python3 scripts/eval_reasoning_sglang.py \
@@ -184,6 +196,7 @@ Stages:
   reward-gate-post-rlmt
   thinking-eval
   causal-probe
+  selector-ablation
   reasoning-eval
 EOF
     ;;

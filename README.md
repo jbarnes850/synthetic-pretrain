@@ -94,6 +94,9 @@ scripts/run_pipeline.sh rlmt-base
 scripts/run_pipeline.sh rlmt-self-improved
 scripts/run_pipeline.sh reward-gate-post-rlmt
 scripts/run_pipeline.sh thinking-eval
+scripts/run_pipeline.sh causal-probe
+scripts/run_pipeline.sh selector-ablation
+scripts/run_pipeline.sh reasoning-eval
 ```
 
 Do not skip the reward gate. RLMT should stop before expensive training if more
