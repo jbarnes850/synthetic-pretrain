@@ -144,7 +144,7 @@ case "${STAGE}" in
       --config configs/thinking_sft_base.yaml \
       --input-jsonl data/processed/interleaved_thinking_heldout.jsonl \
       --judge-endpoint \"${JUDGE_ENDPOINT}\" --judge-model \"${JUDGE_MODEL}\" \
-      --num-prefixes \"${DATA_GATE_PREFIXES:-128}\" --samples-per-prefix \"${DATA_GATE_SAMPLES_PER_PREFIX:-4}\" \
+      --num-prefixes \"${DATA_GATE_PREFIXES:-512}\" --samples-per-prefix \"${DATA_GATE_SAMPLES_PER_PREFIX:-4}\" \
       --output-dir \"outputs/data_integrity_gate/${RUN_ID}\"" \
       2>&1 | tee "logs/${RUN_ID}-data-integrity-gate.log"
     ;;
