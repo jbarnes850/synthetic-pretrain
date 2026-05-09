@@ -1,0 +1,7 @@
+include: configs/thinking_sft_base.yaml
+
+# Thinking Mid-training SFT objective initialized from the standard CPT control.
+
+train:
+  init_from_checkpoint: outputs/standard_cpt/final.pt
+  output_dir: outputs/thinking_sft_cpt

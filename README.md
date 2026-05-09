@@ -11,15 +11,20 @@ The target run uses `Qwen/Qwen3.5-0.8B-Base` as the student and a stronger
 teacher/judge served through an OpenAI-compatible endpoint. The code is arranged
 around the recipe, not around an older release lineage.
 
+The corpus defaults are `mlfoundations/dclm-baseline-1.0-parquet` plus
+`HuggingFaceTB/finemath`, matching the RAM paper's DCLM + FineMath source
+family.
+
 ## Recipe
 
 ```text
-FineWeb-Edu chunks
+DCLM + FineMath chunks
   -> prefix/suffix examples
+  -> standard continued-pretraining control
   -> Self-Improving Pretraining continued pretraining
   -> teacher-inserted interleaved thoughts
   -> SFT/RL split
-  -> Thinking SFT from base and self-improved checkpoints
+  -> Thinking SFT from base, standard-CPT, and self-improved checkpoints
   -> pre-RLMT reward-variance gate
   -> RLMT on thought + suffix generations
   -> causal thought probe and reasoning eval
@@ -29,9 +34,11 @@ The SIP stage follows the paper's Online DPO suffix-vs-K-rollouts branch:
 sample K=16 rollouts from the current policy for each prefix, judge them in a
 full pairwise pool with the original suffix, then optimize chosen versus
 rejected continuations. The quality judge prompt in `prompts/judge_quality.txt`
-matches the prompt printed in the SIP paper. Teacher rewrites are available only
-as a separate ablation (`configs/self_improving_pretraining_rewrite.yaml`),
-where the pool is original suffix + rewrite + K=16 policy rollouts.
+matches the prompt printed in the SIP paper. Pairwise judge calls support
+repeated voting and pointwise scores average the repeated outcomes. Teacher
+rewrites are available only as a separate ablation
+(`configs/self_improving_pretraining_rewrite.yaml`), where the pool is original
+suffix + rewrite + K=16 policy rollouts.
 
 The thinking stages follow the RAM
 mid-training object: augment raw chunks with interleaved thoughts, train SFT on
@@ -45,15 +52,17 @@ incorrect samples.
 
 ```text
 configs/
+  standard_cpt.yaml                 Same-corpus continued-pretraining control
   self_improving_pretraining.yaml   SIP continued-pretraining config
   self_improving_pretraining_rewrite.yaml
   thinking_sft_base.yaml            Thinking SFT from the base model
+  thinking_sft_cpt.yaml             Thinking SFT from the CPT control
   thinking_sft_self_improved.yaml   Thinking SFT from the SIP checkpoint
   thinking_sft_raw_control.yaml     Raw-token budget control
 
 scripts/
   check_models.py                   Offline student/teacher compatibility check
-  prepare_pretraining_data.py       FineWeb-Edu prefix/suffix materialization
+  prepare_pretraining_data.py       DCLM/FineMath prefix/suffix materialization
   build_rewrite_data.py             Teacher rewrite pool builder for ablation
   build_thinking_data.py            Teacher augmentation for interleaved thoughts
   split_midtraining_data.py         Disjoint SFT/RL/heldout split builder
@@ -82,15 +91,20 @@ Container and GPU smoke tests should be staged before full runs:
 ```bash
 scripts/run_pipeline.sh compat
 scripts/run_pipeline.sh prepare-corpus
+scripts/run_pipeline.sh smoke-sip-dpo
+scripts/run_pipeline.sh cpt-baseline
 scripts/run_pipeline.sh sip-cpt
 scripts/run_pipeline.sh build-rewrites
 scripts/run_pipeline.sh sip-cpt-rewrite
 scripts/run_pipeline.sh build-thinking
 scripts/run_pipeline.sh split-thinking
 scripts/run_pipeline.sh sft-base
+scripts/run_pipeline.sh sft-cpt
 scripts/run_pipeline.sh sft-self-improved
 scripts/run_pipeline.sh reward-gate-pre-rlmt
+scripts/run_pipeline.sh smoke-rlmt
 scripts/run_pipeline.sh rlmt-base
+scripts/run_pipeline.sh rlmt-cpt
 scripts/run_pipeline.sh rlmt-self-improved
 scripts/run_pipeline.sh reward-gate-post-rlmt
 scripts/run_pipeline.sh thinking-eval

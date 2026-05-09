@@ -21,27 +21,78 @@ except Exception:  # pragma: no cover - dependency guard
     requests = None
 
 
-PROMPT = """You are augmenting pretraining text with interleaved reasoning traces for thinking mid-training.
+PROMPT = """Below is text scraped from a web page. The text does not contain all
+implicit contexts which are well known to the author, such as world knowledge,
+commonsense, the author's internal thoughts, goals and preferences, etc. Your
+task is to augment the text to add missing contexts and actions, so that the
+augmented text should imitate how an intelligent learner is actively reasoning
+and taking actions to understand the text and predict what comes next.
+Importantly, the added actions should demonstrate meta-learning skills, e.g.
+proactively self-reflect and distill lessons so as to maximize accuracy and
+speed of predicting the future, especially generalize to unseen and different
+tasks.
 
-Given a contiguous text chunk scraped from a web page, return the same text in the same order, but insert brief missing intermediate contexts and reasoning/actions at semantically appropriate positions.
+First, reconstruct the global context. Such global context should provide
+background on how the text was generated. For example, identify who wrote the
+text, their goal(s), and the relevant world model(s) need to be recalled, such
+as common knowledge, commonsense, common logical rules, causal relations,
+reasoning strategies, physical and social principles etc., as well as knowledge
+and logical rules, and key reasoning steps specific to this text. The global
+context should also copy details which are specific to the text and would
+otherwise be almost impossible for anyone to predict without seeing them in the
+global context, e.g. dates, names, text from web scraping, etc. Put the global
+context between <global_context> and </global_context>. DO NOT mention "user".
 
-This should imitate how an intelligent learner actively reconstructs context, reasons, self-verifies, and learns reusable patterns while reading or producing the text.
+Second, insert {min_thoughts}-{max_thoughts} total missing intermediate contexts
+and actions in the interleaving fashion, with the same goal of reconstructing
+context needed to predict the subsequent text. To help teach meta-learning
+skills, the reconstructed missing context should demonstrate how an intelligent
+human will make sense of the text, such as reconstruct a world model with
+physics or social principles that can predict dynamics of the scenario, as well
+as derive or infer implications specific to the matters in the text, etc. For
+example, the inserted context should reconstruct agent(s) in the text and all
+the implicit agentic capabilities they took, such as planning, reasoning,
+metacognition, reflection, tool use, etc. that had resulted in the text. You
+should find the highest-leverage agentic and meta-reasoning strategies the human
+agent(s) may have used but not explicitly written in the text.
 
-Requirements:
-- Preserve the original text content and order. Do not summarize, rewrite, omit, or answer as an assistant.
-- Insert {min_thoughts}-{max_thoughts} total short interleaved spans across the entire chunk, not per sentence or per paragraph.
-- Prefer only the highest-leverage positions: moments where a reader would need context, causal inference, self-verification, or an abstraction to predict what comes next.
-- Use only these paired XML action tags: <global_context>...</global_context>, <world_model>...</world_model>, <recall_knowledge>...</recall_knowledge>, <simulate>...</simulate>, <reusable_lessons>...</reusable_lessons>, <verification>...</verification>.
-- Every inserted action tag must have a matching closing tag before the original text resumes. Never use bare opening tags as labels.
-- Each inserted span should be specific to the local text, not generic commentary.
-- Do not mention a user or prompt.
-- Do not include a separate analysis, thinking process, markdown fence, JSON object, or explanation.
-- Return only the augmented text.
+The inserted context should be from the first-person perspective of the agent
+who wrote the text (if there are multiple agents, first stating which agent this
+first-person perspective is from). To make the agentic capabilities more
+explicit, organize the inserted context with specific action tags, such as:
+- <task> ... </task> or <set_goal> ... </set_goal> for making any implicit goal
+  or preference more concrete and explicit so as to provide context for
+  subsequent actions.
+- <think> ... </think> for reconstructing the inner monologues that will lead
+  to the agent producing or understanding the text, including various reasoning
+  skills such as induction, deduction, abduction, counterfactual reasoning,
+  logical reasoning, causal reasoning, probabilistic reasoning, constraints
+  satisfaction, planning, etc. and meta-reasoning strategies illustrated above.
+- <world_model> ... </world_model> to reconstruct a self-contained world which
+  can simulate the events in the text, such as detailed background knowledge, a
+  set of generally-true facts, physical and social principles, and commonsense
+  that drive the changes of states in the world after agent(s) take different
+  actions.
+- <recall_knowledge> ... </recall_knowledge> to self-ask and retrieve relevant
+  knowledge.
+- <simulate> ... </simulate> to simulate possible states of future, different
+  outcomes via counterfactual reasoning which would help for predicting
+  subsequent actions and events.
+- <reusable_lessons> ... </reusable_lessons> for reading and writing a self-note
+  which contains reusable abstractions and lessons distilled from learning
+  experience.
+- <verification> ... </verification> for proactive self-verification and
+  reflective reasoning processes.
+- <tool_use> ... </tool_use> for invoking external tools, e.g. <python> ...
+  </python> for writing python code, <web_search> ... </web_search> for
+  browsing the web to check facts, etc.
 
-Miniature format example:
-Original sentence one. <global_context>This note reconstructs why sentence two should follow.</global_context> Original sentence two. <verification>This checks the local claim before the next detail.</verification> Original sentence three.
+IMPORTANT: DO NOT change the original text. Preserve all original text content
+and order exactly, and only insert tagged contexts between spans of the original
+text. Do not summarize, rewrite, omit, answer as an assistant, include markdown
+fences, or include a separate explanation. Return only the augmented text.
 
-Text chunk:
+Text:
 {chunk}
 """
 

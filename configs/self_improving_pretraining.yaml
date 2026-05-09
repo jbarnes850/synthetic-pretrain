@@ -42,8 +42,20 @@ train:
 data:
   tokenizer_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
   config_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
-  fineweb_edu_repo_cache: /hf/hub/datasets--HuggingFaceFW--fineweb-edu
-  fineweb_edu_subset: sample/10BT
+  pretraining_sources:
+    - name: dclm
+      repo_cache: /hf/hub/datasets--mlfoundations--dclm-baseline-1.0-parquet
+      path_glob: "**/*.parquet"
+      max_parquet_files: 80
+      weight: 0.70
+      text_column: text
+    - name: finemath
+      repo_cache: /hf/hub/datasets--HuggingFaceTB--finemath
+      subset: finemath-3plus
+      path_glob: "**/*.parquet"
+      max_parquet_files: 40
+      weight: 0.30
+      text_column: text
   processed_dir: data/processed
   materialize_paired: false
   max_examples: 0
@@ -52,7 +64,7 @@ data:
   prefix_tokens: 384
   suffix_tokens: 128
   min_source_tokens: 640
-  fineweb_max_parquet_files: 100
+  max_parquet_files: 120
   examples_jsonl: data/processed/pretraining_examples.jsonl
   raw_examples_jsonl: data/processed/pretraining_examples.jsonl
   online_dpo_examples_jsonl: data/processed/pretraining_examples.jsonl
@@ -62,7 +74,7 @@ selection:
   judge_model: qwen36-35b-a3b
   prompt_path: prompts/judge_quality.txt
   prompt_version: quality_v1
-  judge_repeats: 1
+  judge_repeats: 5
   judge_temperature: 0.7
   judge_top_p: 0.6
   judge_max_tokens: 64

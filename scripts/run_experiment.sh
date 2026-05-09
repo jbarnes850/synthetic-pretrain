@@ -29,7 +29,9 @@ import sys
 cfg = load_config(sys.argv[1])
 condition = cfg["train"]["condition"]
 include_rewrite = bool(cfg["train"].get("include_rewrite_candidate", False))
-print("1" if condition in {"raw_ntp", "online_dpo_selfimproving"} and not include_rewrite else "0")
+import os
+skip_prepare = os.environ.get("SPARK_SKIP_PREPARE", "0") == "1"
+print("1" if condition in {"raw_ntp", "online_dpo_selfimproving"} and not include_rewrite and not skip_prepare else "0")
 PY
 )"
 mkdir -p "${OUTPUT_DIR}"
@@ -58,6 +60,7 @@ docker run --rm --gpus all --ipc=host --network=host \
   -e JUDGE_ENDPOINT="${JUDGE_ENDPOINT:-}" \
   -e JUDGE_MODEL="${JUDGE_MODEL:-}" \
   -e SPARK_SKIP_SELECT="${SPARK_SKIP_SELECT:-0}" \
+  -e SPARK_SKIP_PREPARE="${SPARK_SKIP_PREPARE:-0}" \
   -e CONDITION="${CONDITION}" \
   -e PREPARE_DATA="${PREPARE_DATA}" \
   -w /workspace \

@@ -1,0 +1,38 @@
+include: configs/self_improving_pretraining.yaml
+
+# Live SIP/DPO smoke. It keeps the real online-DPO code path but shrinks the
+# pool so launch validation checks plumbing without burning the full K=16 cost.
+
+data:
+  max_examples: 16
+  raw_max_examples: 16
+  prefix_tokens: 128
+  suffix_tokens: 64
+  min_source_tokens: 220
+  pretraining_sources:
+    - name: dclm
+      repo_cache: /hf/hub/datasets--mlfoundations--dclm-baseline-1.0-parquet
+      path_glob: "**/*.parquet"
+      max_parquet_files: 1
+      weight: 0.70
+      text_column: text
+    - name: finemath
+      repo_cache: /hf/hub/datasets--HuggingFaceTB--finemath
+      subset: finemath-3plus
+      path_glob: "**/*.parquet"
+      max_parquet_files: 1
+      weight: 0.30
+      text_column: text
+
+train:
+  output_dir: outputs/smoke_sip_dpo
+  max_steps: 1
+  eval_every: 1
+  save_every: 0
+  batch_size: 1
+  grad_accum_steps: 1
+  num_rollouts: 2
+
+selection:
+  judge_repeats: 2
+  judge_max_workers: 8

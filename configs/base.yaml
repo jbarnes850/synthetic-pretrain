@@ -12,8 +12,27 @@ runtime:
   num_workers: 0
 
 data:
-  fineweb_edu_repo_cache: /hf/hub/datasets--HuggingFaceFW--fineweb-edu
-  fineweb_edu_subset: sample/10BT
+  dclm_repo_cache: /hf/hub/datasets--mlfoundations--dclm-baseline-1.0-parquet
+  dclm_path_glob: "**/*.parquet"
+  dclm_max_parquet_files: 1
+  finemath_repo_cache: /hf/hub/datasets--HuggingFaceTB--finemath
+  finemath_subset: finemath-3plus
+  finemath_path_glob: "**/*.parquet"
+  finemath_max_parquet_files: 1
+  pretraining_sources:
+    - name: dclm
+      repo_cache: /hf/hub/datasets--mlfoundations--dclm-baseline-1.0-parquet
+      path_glob: "**/*.parquet"
+      max_parquet_files: 1
+      weight: 0.70
+      text_column: text
+    - name: finemath
+      repo_cache: /hf/hub/datasets--HuggingFaceTB--finemath
+      subset: finemath-3plus
+      path_glob: "**/*.parquet"
+      max_parquet_files: 1
+      weight: 0.30
+      text_column: text
   tokenizer_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
   config_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
   processed_dir: data/processed
@@ -25,7 +44,7 @@ data:
   prefix_tokens: 384
   suffix_tokens: 128
   min_source_tokens: 640
-  fineweb_max_parquet_files: 2
+  max_parquet_files: 1
 
 model:
   vocab_size: null

@@ -4,7 +4,20 @@ data:
   max_examples: 128
   raw_max_examples: 128
   max_parquet_files: 1
-  fineweb_max_parquet_files: 1
+  pretraining_sources:
+    - name: dclm
+      repo_cache: /hf/hub/datasets--mlfoundations--dclm-baseline-1.0-parquet
+      path_glob: "**/*.parquet"
+      max_parquet_files: 1
+      weight: 0.70
+      text_column: text
+    - name: finemath
+      repo_cache: /hf/hub/datasets--HuggingFaceTB--finemath
+      subset: finemath-3plus
+      path_glob: "**/*.parquet"
+      max_parquet_files: 1
+      weight: 0.30
+      text_column: text
   prefix_tokens: 128
   suffix_tokens: 64
   min_source_tokens: 220

@@ -43,6 +43,12 @@ RLMT_ARMS = {
         "output_dir": "outputs/rlmt_self_improved",
         "data_path": "data/processed/interleaved_thinking_rl.jsonl",
     },
+    "think_cpt": {
+        "config": ARM_SPECS["think_cpt"]["config"],
+        "checkpoint": ARM_SPECS["think_cpt"]["checkpoint"],
+        "output_dir": "outputs/rlmt_cpt",
+        "data_path": "data/processed/interleaved_thinking_rl.jsonl",
+    },
 }
 
 

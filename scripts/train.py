@@ -320,6 +320,7 @@ def main() -> None:
     judge_top_p = float(cfg.get("selection", {}).get("judge_top_p", 0.6))
     judge_max_tokens = int(cfg.get("selection", {}).get("judge_max_tokens", 64))
     judge_max_workers = int(cfg.get("selection", {}).get("judge_max_workers", 16))
+    judge_repeats = int(os.environ.get("SPARK_JUDGE_REPEATS", cfg.get("selection", {}).get("judge_repeats", 1)))
     prompt_path = cfg.get("selection", {}).get("prompt_path", "prompts/judge_quality.txt")
     prompt_template = ""
     rollout_max_new_tokens = int(cfg["data"]["suffix_tokens"])
@@ -465,6 +466,7 @@ def main() -> None:
                     judge_top_p,
                     judge_max_tokens,
                     judge_max_workers,
+                    judge_repeats,
                     rollout_max_new_tokens,
                     num_rollouts,
                     pad_id,
@@ -581,6 +583,7 @@ def main() -> None:
                     log_entry["gen_latency_s_avg"] = gen_latency_total / max(1, step * grad_accum)
                     log_entry["dpo_kept_prefixes"] = dpo_kept_prefixes
                     log_entry["dpo_total_prefixes"] = dpo_total_prefixes
+                    log_entry["judge_repeats"] = judge_repeats
                 print(json.dumps(log_entry), flush=True)
             elif use_ddp and step % (int(cfg["train"]["log_every"]) * 10) == 0:
                 print(json.dumps({
@@ -663,6 +666,8 @@ def main() -> None:
         metrics["include_rewrite_candidate"] = include_rewrite_candidate
         metrics["pool_size"] = num_rollouts + 1 + int(include_rewrite_candidate)
         metrics["pairs_per_prefix"] = metrics["pool_size"] * (metrics["pool_size"] - 1) // 2
+        metrics["judge_repeats"] = judge_repeats
+        metrics["judge_calls_per_prefix"] = metrics["pairs_per_prefix"] * judge_repeats
         metrics["dpo_kept_prefixes"] = dpo_kept_prefixes
         metrics["dpo_total_prefixes"] = dpo_total_prefixes
         metrics["chosen_is_pivot_rate"] = chosen_original

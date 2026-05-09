@@ -1,0 +1,16 @@
+include: configs/self_improving_pretraining.yaml
+
+# Standard continued-pretraining control on the same DCLM/FineMath corpus and
+# token budget as the SIP arm. This isolates SIP from ordinary CPT gains.
+
+project:
+  seed: 8338
+
+train:
+  condition: raw_ntp
+  init_from_pretrained: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
+  output_dir: outputs/standard_cpt
+
+selection:
+  mode: fixed
+  fixed_choice: original

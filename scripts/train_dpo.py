@@ -114,6 +114,7 @@ def judge_full_pairwise_scores(
     judge_top_p: float,
     judge_max_tokens: int,
     judge_max_workers: int,
+    judge_repeats: int,
     step: int,
     rank: int = 0,
 ) -> tuple[list[list[float]], int]:
@@ -121,8 +122,9 @@ def judge_full_pairwise_scores(
 
     For each prefix i, runs every unordered pair (a, b) with a < b in the
     N-element candidate pool through the pairwise judge with per-pair position
-    randomization. Pointwise score of candidate c = (# pairs c wins) / (N - 1).
-    All prefixes' (N choose 2) prompts are fired in a single concurrent batch.
+    randomization. Each pair can be judged multiple times; pointwise score of
+    candidate c = mean win fraction across its N - 1 comparisons. All prefixes'
+    repeated pair prompts are fired in a single concurrent batch.
 
     Returns (scores[i][c], total_comparisons). scores[i][c] in [0, 1].
     """
@@ -155,28 +157,31 @@ def judge_full_pairwise_scores(
                     # A = cand a, B = cand b
                     prompts.append(build_prompt(prompt_template, prefix_text, cand_texts[a], cand_texts[b]))
 
-    winners = judge_pairwise_batch(
+    vote_rows = judge_pairwise_batch(
         prompts, judge_endpoint, judge_model,
         temperature=judge_temperature, top_p=judge_top_p,
         max_tokens=judge_max_tokens, max_workers=judge_max_workers,
+        repeats=judge_repeats, return_vote_counts=True,
     )
 
     # Tally wins per candidate per prefix.
-    wins = [[0 for _ in range(N)] for _ in range(bsz)]
+    wins = [[0.0 for _ in range(N)] for _ in range(bsz)]
     for idx, (i, a, b) in enumerate(pair_index):
         sw = swaps[idx]
-        w = winners[idx]
-        # Recover which candidate the winner letter refers to.
+        vote = vote_rows[idx]
+        a_votes = int(vote["a_votes"])
+        b_votes = int(vote["b_votes"])
+        repeats = max(1, int(vote["repeats"]))
+        a_fraction_in_prompt = a_votes / repeats
+        # Recover which candidate the A-vote fraction refers to.
         if sw:
-            # A was b, B was a
-            a_won = (w == "B")
+            # Prompt A was candidate b, prompt B was candidate a.
+            a_fraction = b_votes / repeats
         else:
-            # A was a, B was b
-            a_won = (w == "A")
-        if a_won:
-            wins[i][a] += 1
-        else:
-            wins[i][b] += 1
+            # Prompt A was candidate a, prompt B was candidate b.
+            a_fraction = a_fraction_in_prompt
+        wins[i][a] += a_fraction
+        wins[i][b] += 1.0 - a_fraction
 
     denom = max(1, N - 1)
     scores = [[wins[i][c] / denom for c in range(N)] for i in range(bsz)]
@@ -297,6 +302,7 @@ def build_online_dpo_batch(
     judge_top_p: float,
     judge_max_tokens: int,
     judge_max_workers: int,
+    judge_repeats: int,
     max_new_tokens: int,
     num_rollouts: int,
     pad_id: int,
@@ -358,7 +364,7 @@ def build_online_dpo_batch(
     pointwise_scores, total_pairs = judge_full_pairwise_scores(
         prefix_ids, candidates_per_prefix, tokenizer, prompt_template,
         judge_endpoint, judge_model, judge_temperature, judge_top_p,
-        judge_max_tokens, judge_max_workers, step, rank=rank,
+        judge_max_tokens, judge_max_workers, judge_repeats, step, rank=rank,
     )
     judge_latency_s = time.time() - t1
 
@@ -454,6 +460,8 @@ def build_online_dpo_batch(
         "rewrite_available_count": rewrite_available_count,
         "pairs_per_prefix": total_pairs // max(1, bsz),
         "total_judge_pairs": total_pairs,
+        "judge_repeats": judge_repeats,
+        "total_judge_calls": total_pairs * judge_repeats,
         "pivot_pointwise_mean": pivot_score_sum / max(1, bsz),
         "rewrite_pointwise_mean": rewrite_score_sum / max(1, rewrite_available_count),
         "rollout_pointwise_mean": rollout_score_sum / max(1, bsz),

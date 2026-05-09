@@ -60,8 +60,16 @@ case "${STAGE}" in
       --config configs/self_improving_pretraining.yaml --force --validate
     ;;
   sip-cpt)
-    JUDGE_ENDPOINT="${JUDGE_ENDPOINT}" JUDGE_MODEL="${JUDGE_MODEL}" \
+    SPARK_SKIP_PREPARE="${SPARK_SKIP_PREPARE:-1}" JUDGE_ENDPOINT="${JUDGE_ENDPOINT}" JUDGE_MODEL="${JUDGE_MODEL}" \
       scripts/run_experiment.sh configs/self_improving_pretraining.yaml "${RUN_ID}-sip-cpt"
+    ;;
+  cpt-baseline)
+    SPARK_SKIP_PREPARE="${SPARK_SKIP_PREPARE:-1}" \
+      scripts/run_experiment.sh configs/standard_cpt.yaml "${RUN_ID}-cpt-baseline"
+    ;;
+  smoke-sip-dpo)
+    JUDGE_ENDPOINT="${JUDGE_ENDPOINT}" JUDGE_MODEL="${JUDGE_MODEL}" \
+      scripts/run_experiment.sh configs/smoke_sip_dpo.yaml "${RUN_ID}-smoke-sip-dpo"
     ;;
   build-rewrites)
     "${docker_base[@]}" python3 scripts/build_rewrite_data.py \
@@ -75,7 +83,7 @@ case "${STAGE}" in
       --max-workers 16 --resume
     ;;
   sip-cpt-rewrite)
-    JUDGE_ENDPOINT="${JUDGE_ENDPOINT}" JUDGE_MODEL="${JUDGE_MODEL}" \
+    SPARK_SKIP_PREPARE="${SPARK_SKIP_PREPARE:-1}" JUDGE_ENDPOINT="${JUDGE_ENDPOINT}" JUDGE_MODEL="${JUDGE_MODEL}" \
       scripts/run_experiment.sh configs/self_improving_pretraining_rewrite.yaml "${RUN_ID}-sip-cpt-rewrite"
     ;;
   build-thinking)
@@ -87,10 +95,10 @@ case "${STAGE}" in
       --chunk-tokens 384 --max-augmented-tokens 768 \
       --teacher-endpoint '${TEACHER_ENDPOINT}' \
       --teacher-model '${TEACHER_MODEL}' \
-	      --teacher-temperature 0.6 --teacher-top-p 0.95 \
-	      --teacher-max-tokens 1536 \
-	      --candidate-multiplier '${THINKING_CANDIDATE_MULTIPLIER:-1.25}' \
-	      --max-workers 16 --skip-invalid --resume"
+      --teacher-temperature 0.6 --teacher-top-p 0.95 \
+      --teacher-max-tokens 1536 \
+      --candidate-multiplier '${THINKING_CANDIDATE_MULTIPLIER:-1.25}' \
+      --max-workers 16 --skip-invalid --resume"
     ;;
   split-thinking)
     "${docker_base[@]}" python3 scripts/split_midtraining_data.py \
@@ -106,6 +114,10 @@ case "${STAGE}" in
   sft-self-improved)
     INIT_FROM_CHECKPOINT=outputs/self_improving_pretraining/final.pt \
       scripts/run_experiment.sh configs/thinking_sft_self_improved.yaml "${RUN_ID}-sft-self-improved"
+    ;;
+  sft-cpt)
+    INIT_FROM_CHECKPOINT=outputs/standard_cpt/final.pt \
+      scripts/run_experiment.sh configs/thinking_sft_cpt.yaml "${RUN_ID}-sft-cpt"
     ;;
   rlmt-base)
     "${docker_gpu[@]}" python3 scripts/train_rlmt.py \
@@ -123,9 +135,26 @@ case "${STAGE}" in
       --samples-per-prefix 16 --enforce-stop-conditions \
       2>&1 | tee "logs/${RUN_ID}-rlmt-self-improved.log"
     ;;
+  rlmt-cpt)
+    "${docker_gpu[@]}" python3 scripts/train_rlmt.py \
+      --arm think_cpt \
+      --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
+      --steps "${RLMT_STEPS:-1000}" --prefixes-per-step "${RLMT_PREFIXES_PER_STEP:-4}" \
+      --samples-per-prefix 16 --enforce-stop-conditions \
+      2>&1 | tee "logs/${RUN_ID}-rlmt-cpt.log"
+    ;;
+  smoke-rlmt)
+    "${docker_gpu[@]}" python3 scripts/train_rlmt.py \
+      --arm "${SMOKE_RLMT_ARM:-think_base}" \
+      --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
+      --steps 1 --prefixes-per-step 1 --samples-per-prefix 4 \
+      --gen-batch-size 4 --enforce-stop-conditions \
+      --output-dir "outputs/smoke_rlmt/${RUN_ID}" \
+      2>&1 | tee "logs/${RUN_ID}-smoke-rlmt.log"
+    ;;
   reward-gate-pre-rlmt)
     "${docker_gpu[@]}" python3 scripts/eval_reward_gate.py \
-      --arms think_base think_self_improved \
+      --arms think_base think_cpt think_self_improved \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --num-prefixes 128 --samples-per-prefix 16 \
       --output-dir "outputs/reward_gate/pre_rlmt_${RUN_ID}" \
@@ -133,7 +162,7 @@ case "${STAGE}" in
     ;;
   reward-gate-post-rlmt)
     "${docker_gpu[@]}" python3 scripts/eval_reward_gate.py \
-      --arms think_base think_self_improved think_base_rlmt think_self_improved_rlmt \
+      --arms think_base think_cpt think_self_improved think_base_rlmt think_cpt_rlmt think_self_improved_rlmt \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --num-prefixes 128 --samples-per-prefix 16 \
       --output-dir "outputs/reward_gate/post_rlmt_${RUN_ID}" \
@@ -141,7 +170,7 @@ case "${STAGE}" in
     ;;
   thinking-eval)
     "${docker_gpu[@]}" python3 scripts/eval_thinking.py \
-      --arms raw_base think_base think_self_improved think_base_rlmt think_self_improved_rlmt \
+      --arms raw_base think_base think_cpt think_self_improved think_base_rlmt think_cpt_rlmt think_self_improved_rlmt \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --output-dir "outputs/thinking_eval/${RUN_ID}" \
       2>&1 | tee "logs/${RUN_ID}-thinking-eval.log"
@@ -183,15 +212,20 @@ Usage: scripts/run_pipeline.sh <stage>
 Stages:
   compat
   prepare-corpus
+  smoke-sip-dpo
+  cpt-baseline
   sip-cpt
   build-rewrites
   sip-cpt-rewrite
   build-thinking
   split-thinking
   sft-base
+  sft-cpt
   sft-self-improved
   reward-gate-pre-rlmt
+  smoke-rlmt
   rlmt-base
+  rlmt-cpt
   rlmt-self-improved
   reward-gate-post-rlmt
   thinking-eval

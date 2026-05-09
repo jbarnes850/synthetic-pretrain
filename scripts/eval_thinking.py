@@ -37,9 +37,17 @@ ARM_SPECS = {
         "config": "configs/thinking_sft_self_improved.yaml",
         "checkpoint": "outputs/thinking_sft_self_improved/final.pt",
     },
+    "think_cpt": {
+        "config": "configs/thinking_sft_cpt.yaml",
+        "checkpoint": "outputs/thinking_sft_cpt/final.pt",
+    },
     "think_base_rlmt": {
         "config": "configs/thinking_sft_base.yaml",
         "checkpoint": "outputs/rlmt_base/final.pt",
+    },
+    "think_cpt_rlmt": {
+        "config": "configs/thinking_sft_cpt.yaml",
+        "checkpoint": "outputs/rlmt_cpt/final.pt",
     },
     "think_self_improved_rlmt": {
         "config": "configs/thinking_sft_self_improved.yaml",

@@ -87,12 +87,16 @@ def judge_pairwise_batch(
     max_workers: int = 16,
     timeout: float = 30.0,
     retries: int = 2,
-) -> list[str]:
-    results: list[str | None] = [None] * len(prompts)
+    repeats: int = 1,
+    return_vote_counts: bool = False,
+) -> list[str] | list[dict[str, int | str]]:
+    repeats = max(1, repeats)
+    repeated_prompts = [prompt for prompt in prompts for _ in range(repeats)]
+    results: list[str | None] = [None] * len(repeated_prompts)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
             ex.submit(_judge_call, prompt, endpoint, model, temperature, top_p, max_tokens, timeout, retries): i
-            for i, prompt in enumerate(prompts)
+            for i, prompt in enumerate(repeated_prompts)
         }
         for fut in as_completed(futures):
             i = futures[fut]
@@ -101,7 +105,27 @@ def judge_pairwise_batch(
             except Exception as exc:
                 print(f"judge batch item {i} failed: {exc}", flush=True)
                 results[i] = "B"
-    return [winner or "B" for winner in results]
+    winners = [winner or "B" for winner in results]
+    if not return_vote_counts:
+        majority = []
+        for start in range(0, len(winners), repeats):
+            group = winners[start : start + repeats]
+            majority.append("A" if group.count("A") > group.count("B") else "B")
+        return majority
+    votes = []
+    for start in range(0, len(winners), repeats):
+        group = winners[start : start + repeats]
+        a_votes = group.count("A")
+        b_votes = group.count("B")
+        votes.append(
+            {
+                "winner": "A" if a_votes > b_votes else "B",
+                "a_votes": a_votes,
+                "b_votes": b_votes,
+                "repeats": repeats,
+            }
+        )
+    return votes
 
 
 def collate_rollout_raw(batch: list[dict[str, Any]]) -> dict[str, Any]:
