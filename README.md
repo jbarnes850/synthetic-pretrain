@@ -39,9 +39,7 @@ one split, and run RLMT on a disjoint split where reward is assigned to the
 predicted suffix given prefix plus generated thought. RLMT uses a Dr. GRPO-style
 fixed-budget loss: centered returns within each prompt group, no reward-std
 normalization in the optimizer, and response-length tracking for correct and
-incorrect samples. The RAM paper specifies the RLMT reward object but does not
-publish a literal RLMT judge prompt; this code keeps the described reward
-contract rather than inventing a paper-quoted prompt.
+incorrect samples.
 
 ## Repository Map
 
