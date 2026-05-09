@@ -8,7 +8,8 @@ set -euo pipefail
 STAGE="${1:-help}"
 RUN_ID="${RUN_ID:-run-$(date -u +%Y%m%d-%H%M%S)}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${SPARK_TRAIN_IMAGE:-nvcr.io/nvidia/pytorch:26.01-py3}"
+IMAGE="${SPARK_TRAIN_IMAGE:-vllm/vllm-openai:v0.20.0}"
+PREP_IMAGE="${SPARK_PREP_IMAGE:-lmsysorg/sglang:deepseek-v4-grace-blackwell}"
 JUDGE_ENDPOINT="${JUDGE_ENDPOINT:-http://127.0.0.1:30000}"
 JUDGE_MODEL="${JUDGE_MODEL:-qwen36-35b-a3b}"
 TEACHER_ENDPOINT="${TEACHER_ENDPOINT:-${JUDGE_ENDPOINT}}"
@@ -16,12 +17,36 @@ TEACHER_MODEL="${TEACHER_MODEL:-${JUDGE_MODEL}}"
 MODEL_ENDPOINT="${MODEL_ENDPOINT:-http://127.0.0.1:30001}"
 MODEL_NAME="${MODEL_NAME:-policy}"
 ARM="${ARM:-think_self_improved_rlmt}"
+DATA_GATE_SUMMARY="${DATA_GATE_SUMMARY:-outputs/data_integrity_gate/${RUN_ID}/summary.json}"
 
 cd "${PROJECT_DIR}"
 mkdir -p logs data/processed outputs
 
+require_data_integrity_gate() {
+  if [[ "${ALLOW_UNGATED_TRAINING:-0}" == "1" ]]; then
+    echo "warning: ALLOW_UNGATED_TRAINING=1; bypassing data integrity gate" >&2
+    return 0
+  fi
+  python3 - "${DATA_GATE_SUMMARY}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(f"Data integrity gate has not passed: missing {path}")
+summary = json.loads(path.read_text())
+status = summary.get("status")
+passed = summary.get("comparisons", {}).get("go_no_go", {}).get("passed")
+if status != "pass" or passed is not True:
+    raise SystemExit(f"Data integrity gate has not passed: status={status!r} passed={passed!r} path={path}")
+print(f"data_integrity_gate_ok: {path}")
+PY
+}
+
 docker_base=(
   docker run --rm --ipc=host --network=host
+  --user "$(id -u):$(id -g)"
   -v "${PROJECT_DIR}:/workspace"
   -v "${HOME}/.cache/huggingface:/hf:ro"
   -v "${HOME}/models:/models:ro"
@@ -30,11 +55,12 @@ docker_base=(
   -e HF_DATASETS_OFFLINE=1
   -e PYTHONPATH=/workspace/scripts
   -w /workspace
-  "${IMAGE}"
+  "${PREP_IMAGE}"
 )
 
 docker_gpu=(
   docker run --rm --gpus all --ipc=host --network=host
+  --entrypoint bash
   --ulimit memlock=-1 --ulimit stack=67108864
   -v "${PROJECT_DIR}:/workspace"
   -v "${HOME}/.cache/huggingface:/hf:ro"
@@ -45,6 +71,7 @@ docker_gpu=(
   -e PYTHONPATH=/workspace/scripts
   -e JUDGE_ENDPOINT="${JUDGE_ENDPOINT}"
   -e JUDGE_MODEL="${JUDGE_MODEL}"
+  -e RUN_ID="${RUN_ID}"
   -w /workspace
   "${IMAGE}"
 )
@@ -60,14 +87,17 @@ case "${STAGE}" in
       --config configs/self_improving_pretraining.yaml --force --validate
     ;;
   sip-cpt)
+    require_data_integrity_gate
     SPARK_SKIP_PREPARE="${SPARK_SKIP_PREPARE:-1}" JUDGE_ENDPOINT="${JUDGE_ENDPOINT}" JUDGE_MODEL="${JUDGE_MODEL}" \
       scripts/run_experiment.sh configs/self_improving_pretraining.yaml "${RUN_ID}-sip-cpt"
     ;;
   cpt-baseline)
+    require_data_integrity_gate
     SPARK_SKIP_PREPARE="${SPARK_SKIP_PREPARE:-1}" \
       scripts/run_experiment.sh configs/standard_cpt.yaml "${RUN_ID}-cpt-baseline"
     ;;
   smoke-sip-dpo)
+    require_data_integrity_gate
     JUDGE_ENDPOINT="${JUDGE_ENDPOINT}" JUDGE_MODEL="${JUDGE_MODEL}" \
       scripts/run_experiment.sh configs/smoke_sip_dpo.yaml "${RUN_ID}-smoke-sip-dpo"
     ;;
@@ -83,6 +113,7 @@ case "${STAGE}" in
       --max-workers 16 --resume
     ;;
   sip-cpt-rewrite)
+    require_data_integrity_gate
     SPARK_SKIP_PREPARE="${SPARK_SKIP_PREPARE:-1}" JUDGE_ENDPOINT="${JUDGE_ENDPOINT}" JUDGE_MODEL="${JUDGE_MODEL}" \
       scripts/run_experiment.sh configs/self_improving_pretraining_rewrite.yaml "${RUN_ID}-sip-cpt-rewrite"
     ;;
@@ -108,71 +139,87 @@ case "${STAGE}" in
       --heldout-jsonl data/processed/interleaved_thinking_heldout.jsonl \
       --sft-count 32768 --rl-count 28672 --heldout-count 4096
     ;;
+  data-integrity-gate)
+    "${docker_gpu[@]}" -lc "python3 scripts/eval_data_integrity_gate.py \
+      --config configs/thinking_sft_base.yaml \
+      --input-jsonl data/processed/interleaved_thinking_heldout.jsonl \
+      --judge-endpoint \"${JUDGE_ENDPOINT}\" --judge-model \"${JUDGE_MODEL}\" \
+      --num-prefixes \"${DATA_GATE_PREFIXES:-128}\" --samples-per-prefix \"${DATA_GATE_SAMPLES_PER_PREFIX:-4}\" \
+      --output-dir \"outputs/data_integrity_gate/${RUN_ID}\"" \
+      2>&1 | tee "logs/${RUN_ID}-data-integrity-gate.log"
+    ;;
   sft-base)
+    require_data_integrity_gate
     scripts/run_experiment.sh configs/thinking_sft_base.yaml "${RUN_ID}-sft-base"
     ;;
   sft-self-improved)
+    require_data_integrity_gate
     INIT_FROM_CHECKPOINT=outputs/self_improving_pretraining/final.pt \
       scripts/run_experiment.sh configs/thinking_sft_self_improved.yaml "${RUN_ID}-sft-self-improved"
     ;;
   sft-cpt)
+    require_data_integrity_gate
     INIT_FROM_CHECKPOINT=outputs/standard_cpt/final.pt \
       scripts/run_experiment.sh configs/thinking_sft_cpt.yaml "${RUN_ID}-sft-cpt"
     ;;
   rlmt-base)
-    "${docker_gpu[@]}" python3 scripts/train_rlmt.py \
+    require_data_integrity_gate
+    "${docker_gpu[@]}" -lc "python3 -m pip install --quiet wandb && python3 scripts/train_rlmt.py \
       --arm think_base \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --steps "${RLMT_STEPS:-1000}" --prefixes-per-step "${RLMT_PREFIXES_PER_STEP:-4}" \
-      --samples-per-prefix 16 --enforce-stop-conditions \
+      --samples-per-prefix 16 --enforce-stop-conditions" \
       2>&1 | tee "logs/${RUN_ID}-rlmt-base.log"
     ;;
   rlmt-self-improved)
-    "${docker_gpu[@]}" python3 scripts/train_rlmt.py \
+    require_data_integrity_gate
+    "${docker_gpu[@]}" -lc "python3 -m pip install --quiet wandb && python3 scripts/train_rlmt.py \
       --arm think_self_improved \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --steps "${RLMT_STEPS:-1000}" --prefixes-per-step "${RLMT_PREFIXES_PER_STEP:-4}" \
-      --samples-per-prefix 16 --enforce-stop-conditions \
+      --samples-per-prefix 16 --enforce-stop-conditions" \
       2>&1 | tee "logs/${RUN_ID}-rlmt-self-improved.log"
     ;;
   rlmt-cpt)
-    "${docker_gpu[@]}" python3 scripts/train_rlmt.py \
+    require_data_integrity_gate
+    "${docker_gpu[@]}" -lc "python3 -m pip install --quiet wandb && python3 scripts/train_rlmt.py \
       --arm think_cpt \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --steps "${RLMT_STEPS:-1000}" --prefixes-per-step "${RLMT_PREFIXES_PER_STEP:-4}" \
-      --samples-per-prefix 16 --enforce-stop-conditions \
+      --samples-per-prefix 16 --enforce-stop-conditions" \
       2>&1 | tee "logs/${RUN_ID}-rlmt-cpt.log"
     ;;
   smoke-rlmt)
-    "${docker_gpu[@]}" python3 scripts/train_rlmt.py \
+    require_data_integrity_gate
+    "${docker_gpu[@]}" -lc "python3 -m pip install --quiet wandb && python3 scripts/train_rlmt.py \
       --arm "${SMOKE_RLMT_ARM:-think_base}" \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --steps 1 --prefixes-per-step 1 --samples-per-prefix 4 \
       --gen-batch-size 4 --enforce-stop-conditions \
-      --output-dir "outputs/smoke_rlmt/${RUN_ID}" \
+      --output-dir "outputs/smoke_rlmt/${RUN_ID}"" \
       2>&1 | tee "logs/${RUN_ID}-smoke-rlmt.log"
     ;;
   reward-gate-pre-rlmt)
-    "${docker_gpu[@]}" python3 scripts/eval_reward_gate.py \
+    "${docker_gpu[@]}" -lc "python3 scripts/eval_reward_gate.py \
       --arms think_base think_cpt think_self_improved \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --num-prefixes 128 --samples-per-prefix 16 \
-      --output-dir "outputs/reward_gate/pre_rlmt_${RUN_ID}" \
+      --output-dir "outputs/reward_gate/pre_rlmt_${RUN_ID}"" \
       2>&1 | tee "logs/${RUN_ID}-reward-gate-pre-rlmt.log"
     ;;
   reward-gate-post-rlmt)
-    "${docker_gpu[@]}" python3 scripts/eval_reward_gate.py \
+    "${docker_gpu[@]}" -lc "python3 scripts/eval_reward_gate.py \
       --arms think_base think_cpt think_self_improved think_base_rlmt think_cpt_rlmt think_self_improved_rlmt \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --num-prefixes 128 --samples-per-prefix 16 \
-      --output-dir "outputs/reward_gate/post_rlmt_${RUN_ID}" \
+      --output-dir "outputs/reward_gate/post_rlmt_${RUN_ID}"" \
       2>&1 | tee "logs/${RUN_ID}-reward-gate-post-rlmt.log"
     ;;
   thinking-eval)
-    "${docker_gpu[@]}" python3 scripts/eval_thinking.py \
+    "${docker_gpu[@]}" -lc "python3 scripts/eval_thinking.py \
       --arms raw_base think_base think_cpt think_self_improved think_base_rlmt think_cpt_rlmt think_self_improved_rlmt \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
-      --output-dir "outputs/thinking_eval/${RUN_ID}" \
+      --output-dir "outputs/thinking_eval/${RUN_ID}"" \
       2>&1 | tee "logs/${RUN_ID}-thinking-eval.log"
     ;;
   causal-probe)
@@ -219,6 +266,7 @@ Stages:
   sip-cpt-rewrite
   build-thinking
   split-thinking
+  data-integrity-gate
   sft-base
   sft-cpt
   sft-self-improved

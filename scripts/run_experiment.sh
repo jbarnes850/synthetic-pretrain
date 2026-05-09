@@ -3,7 +3,7 @@ set -euo pipefail
 
 CONFIG="${1:-configs/self_improving_pretraining.yaml}"
 RUN_ID="${2:-$(basename "${CONFIG}" .yaml)-$(date -u +%Y%m%d-%H%M%S)}"
-IMAGE="${SPARK_TRAIN_IMAGE:-nvcr.io/nvidia/pytorch:26.01-py3}"
+IMAGE="${SPARK_TRAIN_IMAGE:-vllm/vllm-openai:v0.20.0}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${PROJECT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
@@ -49,6 +49,7 @@ echo "run_experiment: train_log=${OUTPUT_DIR}/train.log"
 echo "run_experiment: worker_dir=${WORKER_DIR}"
 
 docker run --rm --gpus all --ipc=host --network=host \
+  --entrypoint bash \
   --ulimit memlock=-1 --ulimit stack=67108864 \
   -v "${PROJECT_DIR}:/workspace" \
   -v "${HOME}/.cache/huggingface:/hf:ro" \
@@ -63,9 +64,11 @@ docker run --rm --gpus all --ipc=host --network=host \
   -e SPARK_SKIP_PREPARE="${SPARK_SKIP_PREPARE:-0}" \
   -e CONDITION="${CONDITION}" \
   -e PREPARE_DATA="${PREPARE_DATA}" \
+  -e RUN_ID="${RUN_ID}" \
+  -e CONFIG_PATH="${CONFIG}" \
   -w /workspace \
   "${IMAGE}" \
-  bash -lc "set -euo pipefail && if [[ \"\${PREPARE_DATA}\" == \"1\" ]]; then python3 scripts/prepare_pretraining_data.py --config '${CONFIG}' --force; else echo 'run_experiment: skipping prepare_pretraining_data for condition='\"\${CONDITION}\"; fi && python3 scripts/train.py --config '${CONFIG}' 2>&1 | tee '${OUTPUT_DIR}/train.log'" \
+  -lc "set -euo pipefail && python3 -m pip install --quiet wandb && if [[ \"\${PREPARE_DATA}\" == \"1\" ]]; then python3 scripts/prepare_pretraining_data.py --config '${CONFIG}' --force; else echo 'run_experiment: skipping prepare_pretraining_data for condition='\"\${CONDITION}\"; fi && python3 scripts/train.py --config '${CONFIG}' 2>&1 | tee '${OUTPUT_DIR}/train.log'" \
   2>&1 | tee "${RUN_LOG}"
 
 metrics_path="$(PYTHONPATH="${PROJECT_DIR}/scripts" python3 - "${CONFIG}" <<'PY'

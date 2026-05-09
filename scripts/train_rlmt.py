@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import re
 import time
@@ -29,6 +30,7 @@ from eval_reward_gate import (
 )
 from eval_thinking import ARM_SPECS, decode, encode, judge_pointwise, load_model, load_tokenizer
 from transformers import get_cosine_schedule_with_warmup
+from wandb_utils import finish_wandb, init_wandb_run, log_wandb
 
 RLMT_ARMS = {
     "think_base": {
@@ -403,6 +405,18 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "resolved_args.json").write_text(json.dumps(vars(args), indent=2) + "\n", encoding="utf-8")
     (output_dir / "resolved_config.json").write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    wandb_run = init_wandb_run(
+        name=os.environ.get("RUN_ID", f"rlmt-{args.arm}"),
+        job_type="rlmt",
+        config={
+            "arm": args.arm,
+            "checkpoint": str(checkpoint),
+            "output_dir": str(output_dir),
+            "args": vars(args),
+            "config": cfg,
+        },
+        output_dir=output_dir,
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() and cfg["runtime"].get("device") == "cuda" else "cpu")
     tokenizer = load_tokenizer(cfg)
@@ -530,6 +544,7 @@ def main() -> None:
             pre_log_entry["stop_alerts"] = pre_alerts
             pre_log_entry["stop_conditions_enforced"] = True
             print(json.dumps(pre_log_entry), flush=True)
+            log_wandb(wandb_run, pre_log_entry, step=step)
             all_logs.append(pre_log_entry)
             save_jsonl(output_dir / f"step_{step:04d}_samples.jsonl", records)
             stopped_reason = pre_alerts[0]
@@ -589,6 +604,7 @@ def main() -> None:
         log_entry["stop_alerts"] = stop_alerts
         log_entry["stop_conditions_enforced"] = args.enforce_stop_conditions
         print(json.dumps(log_entry), flush=True)
+        log_wandb(wandb_run, log_entry, step=step)
         all_logs.append(log_entry)
         save_jsonl(output_dir / f"step_{step:04d}_samples.jsonl", records)
 
@@ -621,6 +637,8 @@ def main() -> None:
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"final_checkpoint": str(output_dir / "final.pt"), **metrics}, indent=2), flush=True)
+    log_wandb(wandb_run, metrics, step=final_step)
+    finish_wandb(wandb_run)
 
 
 if __name__ == "__main__":

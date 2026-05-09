@@ -79,6 +79,6 @@ selection:
   judge_top_p: 0.6
   judge_max_tokens: 64
   judge_retries: 2
-  judge_max_workers: 100
+  judge_max_workers: 32
   rollout_temperature: 1.0
   rollout_top_p: 1.0

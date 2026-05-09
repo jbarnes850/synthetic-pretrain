@@ -33,6 +33,7 @@ from train_dpo import (
     load_ref_model,
 )
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
+from wandb_utils import finish_wandb, init_wandb_run, log_wandb
 
 
 def cosine_with_floor_schedule(
@@ -403,6 +404,25 @@ def main() -> None:
     if is_main:
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "resolved_config.json").write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    wandb_run = None
+    if is_main:
+        wandb_run = init_wandb_run(
+            name=os.environ.get("RUN_ID", output_dir.name),
+            job_type=condition,
+            config={
+                "config_path": os.environ.get("CONFIG_PATH", ""),
+                "condition": condition,
+                "output_dir": str(output_dir),
+                "train": cfg.get("train", {}),
+                "data": cfg.get("data", {}),
+                "selection": {
+                    key: value
+                    for key, value in cfg.get("selection", {}).items()
+                    if "endpoint" not in key.lower()
+                },
+            },
+            output_dir=output_dir,
+        )
     save_every = int(cfg["train"].get("save_every", 0))
 
     start = time.time()
@@ -585,6 +605,7 @@ def main() -> None:
                     log_entry["dpo_total_prefixes"] = dpo_total_prefixes
                     log_entry["judge_repeats"] = judge_repeats
                 print(json.dumps(log_entry), flush=True)
+                log_wandb(wandb_run, log_entry, step=step)
             elif use_ddp and step % (int(cfg["train"]["log_every"]) * 10) == 0:
                 print(json.dumps({
                     "rank": rank,
@@ -598,6 +619,7 @@ def main() -> None:
             eval_model = model.module if use_ddp else model
             val_loss, counts = evaluate(eval_model, val_loader, device)
             print(json.dumps({"step": step, "val_loss": val_loss, "chosen_counts": dict(counts)}), flush=True)
+            log_wandb(wandb_run, {"val_loss": val_loss}, step=step)
 
         if is_main and save_every > 0 and (step % save_every == 0 or step == max_steps):
             unwrapped = model.module if use_ddp else model
@@ -691,6 +713,8 @@ def main() -> None:
             torch.save(unwrapped.state_dict(), output_dir / "final.pt")
         for key, value in metrics.items():
             emit_metric(key, value)
+        log_wandb(wandb_run, metrics, step=step)
+        finish_wandb(wandb_run)
 
     if use_ddp:
         import torch.distributed as dist

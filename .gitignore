@@ -1,4 +1,7 @@
 # Runtime state (excluded from repo)
+.env
+.env.*
+!.env.example
 data/
 outputs/
 logs/
