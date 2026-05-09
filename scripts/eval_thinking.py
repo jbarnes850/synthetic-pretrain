@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thinking mid-training evals for the released experiment.
+"""Thinking mid-training evals.
 
 This complements the plain continuation judge eval. It asks whether the
 interleaved-thinking SFT arms learned the intended mechanism:
@@ -21,7 +21,7 @@ from typing import Any
 import requests
 import torch
 import torch.nn.functional as F
-from common import jsonl_iter, latest_snapshot, load_config, now_run_id, safe_mean, set_seed
+from common import load_config, load_split_rows, now_run_id, resolve_hf_path, safe_mean, set_seed
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 ARM_SPECS = {
@@ -33,7 +33,7 @@ ARM_SPECS = {
         "config": "configs/thinking_sft_base.yaml",
         "checkpoint": "outputs/thinking_sft_base/final.pt",
     },
-    "think_phase3": {
+    "think_self_improved": {
         "config": "configs/thinking_sft_self_improved.yaml",
         "checkpoint": "outputs/thinking_sft_self_improved/final.pt",
     },
@@ -41,7 +41,7 @@ ARM_SPECS = {
         "config": "configs/thinking_sft_base.yaml",
         "checkpoint": "outputs/rlmt_base/final.pt",
     },
-    "think_phase3_rlmt": {
+    "think_self_improved_rlmt": {
         "config": "configs/thinking_sft_self_improved.yaml",
         "checkpoint": "outputs/rlmt_self_improved/final.pt",
     },
@@ -78,7 +78,7 @@ Answer: Today Julie read 12 * 2 = 24 pages. She has read 12 + 24 = 36 pages. She
 
 def load_tokenizer(cfg: dict[str, Any]):
     tokenizer = AutoTokenizer.from_pretrained(
-        latest_snapshot(cfg["data"]["tokenizer_repo_cache"]),
+        resolve_hf_path(cfg["data"]["tokenizer_repo_cache"]),
         local_files_only=True,
         trust_remote_code=True,
     )
@@ -98,7 +98,7 @@ def load_model(cfg: dict[str, Any], checkpoint: Path, device: torch.device):
             print(f"warning: could not configure SDP backends: {exc}", flush=True)
     dtype = torch.bfloat16 if cfg["runtime"].get("dtype") == "bfloat16" else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
-        cfg["train"]["init_from_pretrained"],
+        resolve_hf_path(cfg["train"]["init_from_pretrained"]),
         local_files_only=True,
         trust_remote_code=True,
         torch_dtype=dtype,
@@ -496,7 +496,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--judge-endpoint", default="http://127.0.0.1:30000")
-    parser.add_argument("--judge-model", default="qwen-judge")
+    parser.add_argument("--judge-model", default="qwen36-35b-a3b")
     parser.add_argument("--seed", type=int, default=4337)
     parser.add_argument("--num-thought-forced", type=int, default=128)
     parser.add_argument("--num-token-nll", type=int, default=512)
@@ -515,7 +515,7 @@ def main() -> None:
     parser.add_argument(
         "--arms",
         nargs="+",
-        default=["raw_base", "think_base", "think_phase3"],
+        default=["raw_base", "think_base", "think_self_improved"],
         help="Arm names from ARM_SPECS to evaluate.",
     )
     args = parser.parse_args()
@@ -525,9 +525,13 @@ def main() -> None:
         raise ValueError(f"Unknown arms: {unknown_arms}; available={sorted(ARM_SPECS)}")
 
     set_seed(args.seed)
-    cfg = load_config(ARM_SPECS["think_base"]["config"])
+    cfg = load_config(ARM_SPECS[args.arms[0]]["config"])
     tokenizer = load_tokenizer(cfg)
-    rows = [row for row in jsonl_iter(cfg["data"]["interleaved_thinking_examples_jsonl"]) if row["split"] == "val"]
+    rows = load_split_rows(
+        cfg["data"]["interleaved_thinking_examples_jsonl"],
+        "val",
+        cfg["data"].get("heldout_examples_jsonl"),
+    )
     rng = random.Random(args.seed)
     rng.shuffle(rows)
     out_dir = Path(args.output_dir) if args.output_dir else Path("outputs/thinking_eval") / now_run_id("thinking-eval")

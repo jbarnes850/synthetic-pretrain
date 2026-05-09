@@ -1,0 +1,14 @@
+include: configs/self_improving_pretraining.yaml
+
+# SIP ablation: original suffix + teacher rewrite + K policy rollouts.
+# Keep this separate from the mainline suffix-vs-rollouts run so teacher
+# rewrites cannot hide whether self-generated rollouts improve over time.
+
+train:
+  include_rewrite_candidate: true
+  output_dir: outputs/self_improving_pretraining_rewrite
+
+data:
+  examples_jsonl: data/processed/pretraining_examples_with_rewrites.jsonl
+  raw_examples_jsonl: data/processed/pretraining_examples_with_rewrites.jsonl
+  online_dpo_examples_jsonl: data/processed/pretraining_examples_with_rewrites.jsonl

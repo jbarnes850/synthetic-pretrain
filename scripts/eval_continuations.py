@@ -221,8 +221,8 @@ def write_examples_markdown(path: Path, paired: list[dict[str, Any]], limit: int
         chunks.append(row["prefix_text"].strip() + "\n")
         chunks.append("### Base Continuation\n")
         chunks.append(row["base_text"].strip() + "\n")
-        chunks.append("### Phase3 Continuation\n")
-        chunks.append(row["phase3_text"].strip() + "\n")
+        chunks.append("### Self-Improved Continuation\n")
+        chunks.append(row["self_improved_text"].strip() + "\n")
     path.write_text("\n".join(chunks), encoding="utf-8")
 
 
@@ -241,7 +241,7 @@ def main() -> None:
     set_seed(args.seed)
     cfg = load_config(args.config)
     run_dir = Path(args.run_dir)
-    out_dir = Path(args.output_dir) if args.output_dir else run_dir / "evals" / now_run_id("phase3-eval")
+    out_dir = Path(args.output_dir) if args.output_dir else run_dir / "evals" / now_run_id("continuation-eval")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     training_summary = summarize_training(run_dir)
@@ -276,7 +276,7 @@ def main() -> None:
             "max_tokens": int(cfg["selection"].get("judge_max_tokens", 64)),
             "prompt_path": cfg["selection"].get("prompt_path", "prompts/judge_quality.txt"),
         },
-        "eval_parity_note": "Base and Phase3-final use identical validation rows and greedy decoding settings.",
+        "eval_parity_note": "Base and self-improved checkpoints use identical validation rows and greedy decoding settings.",
     }
     (out_dir / "sampling_config.json").write_text(json.dumps(sampling_config, indent=2) + "\n", encoding="utf-8")
 
@@ -287,28 +287,30 @@ def main() -> None:
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
-    phase3_model = load_model(cfg, checkpoint=run_dir / "final.pt", device=device)
-    phase3_val_loss = evaluate_val_loss(phase3_model, val_rows, tokenizer, args.val_batch_size, device)
-    phase3_gens = generate_continuations(phase3_model, tokenizer, sample_rows, max_new_tokens, args.gen_batch_size, device)
-    del phase3_model
+    self_improved_model = load_model(cfg, checkpoint=run_dir / "final.pt", device=device)
+    self_improved_val_loss = evaluate_val_loss(self_improved_model, val_rows, tokenizer, args.val_batch_size, device)
+    self_improved_gens = generate_continuations(
+        self_improved_model, tokenizer, sample_rows, max_new_tokens, args.gen_batch_size, device
+    )
+    del self_improved_model
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
     prompt_template = load_prompt_template(sampling_config["judge"]["prompt_path"])
     judge_inputs = []
     swaps = []
-    for i, (row, base_ids, phase3_ids) in enumerate(zip(sample_rows, base_gens, phase3_gens)):
+    for i, (row, base_ids, self_improved_ids) in enumerate(zip(sample_rows, base_gens, self_improved_gens)):
         prefix = text_for(tokenizer, row["prefix_ids"])
         base = text_for(tokenizer, base_ids)
-        phase3 = text_for(tokenizer, phase3_ids)
+        self_improved = text_for(tokenizer, self_improved_ids)
         swap = rng.random() < 0.5
         swaps.append(swap)
-        cand_a, cand_b = (phase3, base) if swap else (base, phase3)
+        cand_a, cand_b = (self_improved, base) if swap else (base, self_improved)
         judge_inputs.append({
             "judge_prompt": build_prompt(prompt_template, prefix, cand_a, cand_b),
             "prefix_text": prefix,
             "base_text": base,
-            "phase3_text": phase3,
+            "self_improved_text": self_improved,
             "original_suffix_text": text_for(tokenizer, row["original_suffix_ids"]),
         })
 
@@ -323,7 +325,7 @@ def main() -> None:
     )
 
     paired = []
-    phase3_wins = 0
+    self_improved_wins = 0
     base_wins = 0
     invalid = 0
     malformed = 0
@@ -336,10 +338,10 @@ def main() -> None:
             if winner in {"a", "b"}:
                 malformed += 1
                 winner = winner.upper()
-            phase3_won = (winner == "A" and swap) or (winner == "B" and not swap)
-            if phase3_won:
-                phase3_wins += 1
-                winner_label = "phase3"
+            self_improved_won = (winner == "A" and swap) or (winner == "B" and not swap)
+            if self_improved_won:
+                self_improved_wins += 1
+                winner_label = "self_improved"
             else:
                 base_wins += 1
                 winner_label = "base"
@@ -347,10 +349,10 @@ def main() -> None:
             "index": i,
             "winner_label": winner_label,
             "judge_winner": judge["winner"],
-            "phase3_was_option_a": swap,
+            "self_improved_was_option_a": swap,
             "prefix_text": row["prefix_text"],
             "base_text": row["base_text"],
-            "phase3_text": row["phase3_text"],
+            "self_improved_text": row["self_improved_text"],
             "original_suffix_text": row["original_suffix_text"],
             "raw_judge": judge["raw_judge"],
         })
@@ -360,26 +362,26 @@ def main() -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     write_examples_markdown(out_dir / "representative_examples.md", paired, args.num_examples_md)
 
-    valid = max(1, phase3_wins + base_wins)
+    valid = max(1, self_improved_wins + base_wins)
     summary = {
         "run_dir": str(run_dir),
         "output_dir": str(out_dir),
         "num_val_rows": len(val_rows),
         "num_pairwise_examples": len(sample_rows),
         "base_val_loss": base_val_loss,
-        "phase3_val_loss": phase3_val_loss,
-        "phase3_minus_base_val_loss": phase3_val_loss - base_val_loss,
-        "phase3_win_rate": phase3_wins / valid,
+        "self_improved_val_loss": self_improved_val_loss,
+        "self_improved_minus_base_val_loss": self_improved_val_loss - base_val_loss,
+        "self_improved_win_rate": self_improved_wins / valid,
         "base_win_rate": base_wins / valid,
         "invalid_rate": invalid / max(1, len(sample_rows)),
         "malformed_but_parsed_rate": malformed / max(1, len(sample_rows)),
-        "phase3_wins": phase3_wins,
+        "self_improved_wins": self_improved_wins,
         "base_wins": base_wins,
         "invalid": invalid,
         "base_repetition_4gram_rate": repetition_4gram_rate(base_gens),
-        "phase3_repetition_4gram_rate": repetition_4gram_rate(phase3_gens),
+        "self_improved_repetition_4gram_rate": repetition_4gram_rate(self_improved_gens),
         "base_avg_chars": safe_mean([len(p["base_text"]) for p in paired]),
-        "phase3_avg_chars": safe_mean([len(p["phase3_text"]) for p in paired]),
+        "self_improved_avg_chars": safe_mean([len(p["self_improved_text"]) for p in paired]),
         "sampling_config": sampling_config,
         "training_summary_path": str(out_dir / "training_summary.json"),
         "paired_examples_path": str(out_dir / "paired_continuations.jsonl"),

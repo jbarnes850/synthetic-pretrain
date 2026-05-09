@@ -8,8 +8,9 @@ with pivot judging against the original suffix (page 10 variant).
 
 Per training step, for each prefix:
   1. Generate K rollouts from the current policy.
-  2. Judge each rollout pairwise against the original suffix (the pivot),
-     with position randomization. Score = 1.0 if rollout wins, 0.0 otherwise.
+  2. Judge the candidate pool full-pairwise with position randomization.
+     Mainline pool = original suffix + K rollouts. Rewrite ablation pool =
+     original suffix + teacher rewrite + K rollouts.
   3. Chosen = argmax score, rejected = argmin score. Skip if all equal.
   4. Forward the frozen reference on chosen+rejected to get suffix log-probs.
   5. Return a batch ready for compute_dpo_loss().
@@ -304,6 +305,7 @@ def build_online_dpo_batch(
     rollout_temperature: float = 1.0,
     rollout_top_p: float = 1.0,
     rank: int = 0,
+    include_rewrite_candidate: bool = False,
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]] | tuple[None, dict[str, Any]]:
     """Rollouts -> pivot judge -> select chosen/rejected -> ref log-probs.
 
@@ -315,7 +317,7 @@ def build_online_dpo_batch(
     """
     prefix_ids = raw_batch["prefix_ids"]
     original_ids = raw_batch["original_suffix_ids"]
-    rewrite_ids = raw_batch["rewrite_suffix_ids"]  # kept for stats only
+    rewrite_ids = raw_batch.get("rewrite_suffix_ids", [[] for _ in prefix_ids])
     bsz = len(prefix_ids)
 
     # 1. K rollouts from the current policy
@@ -326,15 +328,31 @@ def build_online_dpo_batch(
     )
     gen_latency_s = time.time() - t0
 
-    # 2. Build the unified candidate pool per prefix: index 0 = original
-    #    suffix (pivot), indices 1..K = rollouts. Paper's champion pool
-    #    (Table 6 "Online DPO (suffix vs 16 rollouts)"). Then run FULL
-    #    pairwise judging over the pool (p.8: "all pairwise comparisons
-    #    amongst candidates ... mean of their rewards ... pointwise scores").
-    candidates_per_prefix: list[list[list[int]]] = [
-        [original_ids[i]] + rollouts[i] for i in range(bsz)
-    ]
-    N = num_rollouts + 1
+    # 2. Build the unified candidate pool. Mainline uses the paper branch
+    #    "suffix vs K rollouts"; the rewrite ablation uses
+    #    "suffix + rewrite vs K rollouts" with the same full-pairwise judge.
+    candidates_per_prefix: list[list[list[int]]] = []
+    labels_per_prefix: list[list[str]] = []
+    rewrite_available_count = 0
+    for i in range(bsz):
+        candidates = [original_ids[i]]
+        labels = ["original"]
+        if include_rewrite_candidate and rewrite_ids[i]:
+            candidates.append(rewrite_ids[i])
+            labels.append("rewrite")
+            rewrite_available_count += 1
+        elif include_rewrite_candidate:
+            raise RuntimeError(
+                "include_rewrite_candidate=True requires rewrite_suffix_ids for every row; "
+                "run scripts/build_rewrite_data.py before the rewrite ablation."
+            )
+        candidates.extend(rollouts[i])
+        labels.extend(["rollout"] * len(rollouts[i]))
+        candidates_per_prefix.append(candidates)
+        labels_per_prefix.append(labels)
+    N = len(candidates_per_prefix[0])
+    if any(len(candidates) != N for candidates in candidates_per_prefix):
+        raise RuntimeError("All prefixes in a DPO batch must have the same candidate-pool size")
 
     t1 = time.time()
     pointwise_scores, total_pairs = judge_full_pairwise_scores(
@@ -350,45 +368,100 @@ def build_online_dpo_batch(
     kept_rejected: list[list[int]] = []
     chosen_is_pivot = 0
     rejected_is_pivot = 0
+    chosen_is_rewrite = 0
+    rejected_is_rewrite = 0
+    chosen_is_rollout = 0
+    rejected_is_rollout = 0
     pivot_score_sum = 0.0
+    rewrite_score_sum = 0.0
     rollout_score_sum = 0.0  # averaged across K rollouts per prefix
     pool_score_max_sum = 0.0
     pool_score_min_sum = 0.0
+    candidate_audit_records: list[dict[str, Any]] = []
     for i in range(bsz):
         scores_i = pointwise_scores[i]
         pivot_score_sum += scores_i[0]
-        rollout_score_sum += sum(scores_i[1:]) / max(1, len(scores_i) - 1)
+        rollout_scores = [score for score, label in zip(scores_i, labels_per_prefix[i]) if label == "rollout"]
+        rollout_score_sum += sum(rollout_scores) / max(1, len(rollout_scores))
+        if "rewrite" in labels_per_prefix[i]:
+            rewrite_score_sum += scores_i[labels_per_prefix[i].index("rewrite")]
         pool_score_max_sum += max(scores_i)
         pool_score_min_sum += min(scores_i)
         pair = _select_chosen_rejected(scores_i, step, i)
         if pair is None:
+            candidate_audit_records.append(
+                {
+                    "step": step,
+                    "rank": rank,
+                    "prefix_index": i,
+                    "candidate_labels": labels_per_prefix[i],
+                    "candidate_scores": scores_i,
+                    "chosen_index": None,
+                    "rejected_index": None,
+                    "chosen_label": None,
+                    "rejected_label": None,
+                    "tie": True,
+                }
+            )
             continue
         c_idx, r_idx = pair
         kept_prefixes.append(prefix_ids[i])
         kept_chosen.append(candidates_per_prefix[i][c_idx])
         kept_rejected.append(candidates_per_prefix[i][r_idx])
-        if c_idx == 0:
+        chosen_label = labels_per_prefix[i][c_idx]
+        rejected_label = labels_per_prefix[i][r_idx]
+        if chosen_label == "original":
             chosen_is_pivot += 1
-        if r_idx == 0:
+        elif chosen_label == "rewrite":
+            chosen_is_rewrite += 1
+        elif chosen_label == "rollout":
+            chosen_is_rollout += 1
+        if rejected_label == "original":
             rejected_is_pivot += 1
+        elif rejected_label == "rewrite":
+            rejected_is_rewrite += 1
+        elif rejected_label == "rollout":
+            rejected_is_rollout += 1
+        candidate_audit_records.append(
+            {
+                "step": step,
+                "rank": rank,
+                "prefix_index": i,
+                "candidate_labels": labels_per_prefix[i],
+                "candidate_scores": scores_i,
+                "chosen_index": c_idx,
+                "rejected_index": r_idx,
+                "chosen_label": chosen_label,
+                "rejected_label": rejected_label,
+                "tie": False,
+            }
+        )
 
     stats: dict[str, Any] = {
         "total": bsz,
         "kept": len(kept_prefixes),
         "chosen_is_pivot_count": chosen_is_pivot,
         "rejected_is_pivot_count": rejected_is_pivot,
+        "chosen_is_rewrite_count": chosen_is_rewrite,
+        "rejected_is_rewrite_count": rejected_is_rewrite,
+        "chosen_is_rollout_count": chosen_is_rollout,
+        "rejected_is_rollout_count": rejected_is_rollout,
         "judge_latency_s": judge_latency_s,
         "gen_latency_s": gen_latency_s,
         "num_rollouts_per_prefix": num_rollouts,
         "pool_size": N,
+        "include_rewrite_candidate": include_rewrite_candidate,
+        "rewrite_available_count": rewrite_available_count,
         "pairs_per_prefix": total_pairs // max(1, bsz),
         "total_judge_pairs": total_pairs,
         "pivot_pointwise_mean": pivot_score_sum / max(1, bsz),
+        "rewrite_pointwise_mean": rewrite_score_sum / max(1, rewrite_available_count),
         "rollout_pointwise_mean": rollout_score_sum / max(1, bsz),
         "pool_top_score_mean": pool_score_max_sum / max(1, bsz),
         "pool_bottom_score_mean": pool_score_min_sum / max(1, bsz),
         "original_suffix_len_mean": sum(len(o) for o in original_ids) / max(1, len(original_ids)),
-        "rewrite_suffix_len_mean": sum(len(r) for r in rewrite_ids) / max(1, len(rewrite_ids)),
+        "rewrite_suffix_len_mean": sum(len(r) for r in rewrite_ids if r) / max(1, rewrite_available_count),
+        "candidate_audit_records": candidate_audit_records,
     }
 
     if not kept_prefixes:

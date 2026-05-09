@@ -3,7 +3,7 @@ project:
   seed: 1337
 
 runtime:
-  image: scitrera/dgx-spark-sglang:0.5.9-t5
+  image: nvcr.io/nvidia/pytorch:26.01-py3
   workdir: /workspace
   hf_home: /hf
   model_root: /models
@@ -12,38 +12,34 @@ runtime:
   num_workers: 0
 
 data:
-  finephrase_repo_cache: /hf/hub/datasets--HuggingFaceFW--finephrase
-  finephrase_subset: math
   fineweb_edu_repo_cache: /hf/hub/datasets--HuggingFaceFW--fineweb-edu
   fineweb_edu_subset: sample/10BT
-  tokenizer_repo_cache: /hf/hub/models--Qwen--Qwen3-0.6B
-  config_repo_cache: /hf/hub/models--Qwen--Qwen3-0.6B
+  tokenizer_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
+  config_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
   processed_dir: data/processed
-  examples_jsonl: data/processed/examples.jsonl
-  raw_examples_jsonl: data/processed/raw_fineweb_examples.jsonl
-  selected_jsonl: data/processed/selected_targets_openai_judge.jsonl
+  examples_jsonl: data/processed/pretraining_examples.jsonl
+  raw_examples_jsonl: data/processed/pretraining_examples.jsonl
   max_examples: 2048
   raw_max_examples: 2048
   val_fraction: 0.05
   prefix_tokens: 384
   suffix_tokens: 128
   min_source_tokens: 640
-  max_parquet_files: 4
   fineweb_max_parquet_files: 2
 
 model:
   vocab_size: null
-  hidden_size: 512
-  intermediate_size: 1536
-  num_hidden_layers: 6
-  num_attention_heads: 8
-  num_key_value_heads: 2
-  max_position_embeddings: 1024
-  tie_word_embeddings: true
+  hidden_size: null
+  intermediate_size: null
+  num_hidden_layers: null
+  num_attention_heads: null
+  num_key_value_heads: null
+  max_position_embeddings: null
+  tie_word_embeddings: null
 
 train:
-  condition: rfnll_original_vs_finephrase
-  output_dir: outputs/reward_filtered_nll
+  condition: raw_ntp
+  output_dir: outputs/raw_ntp
   max_steps: 200
   eval_every: 50
   save_every: 0
@@ -57,12 +53,9 @@ train:
   generation_eval_examples: 8
 
 selection:
-  mode: openai
-  candidates:
-    - original
-    - finephrase
+  mode: judge
   judge_endpoint: http://127.0.0.1:30000
-  judge_model: qwen-judge
+  judge_model: qwen36-35b-a3b
   prompt_path: prompts/judge_quality.txt
   prompt_version: quality_v1
   judge_repeats: 3

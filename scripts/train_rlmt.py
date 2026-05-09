@@ -3,7 +3,8 @@
 
 Implements the paper-aligned object:
 prefix -> generated thought -> predicted suffix -> judge(predicted suffix, true suffix)
-followed by a group-relative policy update over K samples per prefix.
+followed by a Dr. GRPO-style fixed-budget group policy update over K samples
+per prefix.
 """
 from __future__ import annotations
 
@@ -34,11 +35,13 @@ RLMT_ARMS = {
         "config": ARM_SPECS["think_base"]["config"],
         "checkpoint": ARM_SPECS["think_base"]["checkpoint"],
         "output_dir": "outputs/rlmt_base",
+        "data_path": "data/processed/interleaved_thinking_rl.jsonl",
     },
-    "think_phase3": {
-        "config": ARM_SPECS["think_phase3"]["config"],
-        "checkpoint": ARM_SPECS["think_phase3"]["checkpoint"],
+    "think_self_improved": {
+        "config": ARM_SPECS["think_self_improved"]["config"],
+        "checkpoint": ARM_SPECS["think_self_improved"]["checkpoint"],
         "output_dir": "outputs/rlmt_self_improved",
+        "data_path": "data/processed/interleaved_thinking_rl.jsonl",
     },
 }
 
@@ -112,20 +115,19 @@ def pad_training_batch(
     )
 
 
-def sequence_logps(
+def token_logps(
     model,
     input_ids: torch.Tensor,
     labels: torch.Tensor,
     attention_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     logits = model(input_ids=input_ids, attention_mask=attention_mask).logits[:, :-1, :]
     targets = labels[:, 1:]
     mask = targets.ne(-100)
     safe_targets = targets.masked_fill(~mask, 0)
-    token_logps = F.log_softmax(logits, dim=-1).gather(-1, safe_targets.unsqueeze(-1)).squeeze(-1)
-    token_logps = token_logps * mask
+    logps = F.log_softmax(logits, dim=-1).gather(-1, safe_targets.unsqueeze(-1)).squeeze(-1)
     counts = mask.sum(dim=1).clamp_min(1)
-    return token_logps.sum(dim=1) / counts, counts
+    return logps, mask.float(), counts
 
 
 def artifact_flag(text: str) -> bool:
@@ -144,7 +146,7 @@ def artifact_flag(text: str) -> bool:
     return False
 
 
-def group_advantages(records: list[dict[str, Any]], eps: float) -> tuple[list[float], list[dict[str, Any]]]:
+def group_advantages(records: list[dict[str, Any]]) -> tuple[list[float], list[dict[str, Any]]]:
     by_prefix: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in records:
         by_prefix[int(row["prefix_index"])].append(row)
@@ -157,7 +159,7 @@ def group_advantages(records: list[dict[str, Any]], eps: float) -> tuple[list[fl
         variance = safe_mean([(reward - mean) ** 2 for reward in rewards])
         std = math.sqrt(variance)
         for row, reward in zip(group, rewards):
-            advantages[index_by_id[id(row)]] = 0.0 if std < eps else (reward - mean) / (std + eps)
+            advantages[index_by_id[id(row)]] = reward - mean
         stats.append(
             {
                 "prefix_index": prefix_index,
@@ -183,6 +185,10 @@ def summarize_step(
     all_zero = [g for g in group_stats if g["valid"] > 0 and g["mean"] <= 0.0]
     all_one = [g for g in group_stats if g["valid"] > 0 and g["mean"] >= 1.0]
     total_new = [row["thought_tokens"] + row["suffix_tokens"] for row in records]
+    correct = [row for row in valid if row["score"] == 1]
+    incorrect = [row for row in valid if row["score"] == 0]
+    correct_total_new = [row["thought_tokens"] + row["suffix_tokens"] for row in correct]
+    incorrect_total_new = [row["thought_tokens"] + row["suffix_tokens"] for row in incorrect]
     return {
         "reward_mean": safe_mean(scores),
         "reward_std": math.sqrt(safe_mean([(score - safe_mean(scores)) ** 2 for score in scores])) if scores else 0.0,
@@ -194,10 +200,48 @@ def summarize_step(
         "avg_thought_words": safe_mean([row["thought_words"] for row in records]),
         "avg_suffix_words": safe_mean([row["predicted_suffix_words"] for row in records]),
         "avg_total_new_tokens": safe_mean(total_new),
+        "avg_total_new_tokens_correct": safe_mean(correct_total_new),
+        "avg_total_new_tokens_incorrect": safe_mean(incorrect_total_new),
+        "avg_thought_words_correct": safe_mean([row["thought_words"] for row in correct]),
+        "avg_thought_words_incorrect": safe_mean([row["thought_words"] for row in incorrect]),
+        "avg_suffix_words_correct": safe_mean([row["predicted_suffix_words"] for row in correct]),
+        "avg_suffix_words_incorrect": safe_mean([row["predicted_suffix_words"] for row in incorrect]),
+        "correct_sample_count": len(correct),
+        "incorrect_sample_count": len(incorrect),
         "artifact_rate": safe_mean([float(row["artifact_flag"]) for row in records]),
         "samples_per_sec": len(records) / max(1e-6, elapsed_s),
         "tok_per_sec": tokens_scored / max(1e-6, elapsed_s),
     }
+
+
+def collect_stop_alerts(
+    log_entry: dict[str, Any],
+    args: argparse.Namespace,
+    mem: float,
+    length_growth: float,
+    baseline_near_zero: float,
+    reward_collapse_streak: int,
+) -> tuple[list[str], int]:
+    stop_alerts = []
+    if mem >= 0 and mem < args.min_available_mem_gib:
+        stop_alerts.append("low_memory")
+    if log_entry["invalid_judge_rate"] > args.max_invalid_rate:
+        stop_alerts.append("judge_invalid_rate")
+    if log_entry["artifact_rate"] > args.max_artifact_rate:
+        stop_alerts.append("artifact_rate")
+    if log_entry["near_zero_group_rate"] > args.max_near_zero_group_rate:
+        stop_alerts.append("near_zero_group_rate")
+    if length_growth > args.max_length_growth:
+        stop_alerts.append("response_length_growth")
+    if log_entry["near_zero_group_rate"] > baseline_near_zero + args.near_zero_worsen_pp:
+        stop_alerts.append("near_zero_group_worsened")
+    if log_entry["all_zero_group_rate"] >= 1.0 or log_entry["all_one_group_rate"] >= 1.0:
+        reward_collapse_streak += 1
+    else:
+        reward_collapse_streak = 0
+    if reward_collapse_streak >= 2:
+        stop_alerts.append("reward_collapsed")
+    return stop_alerts, reward_collapse_streak
 
 
 def resolve_rows(args, tokenizer) -> list[dict[str, Any]]:
@@ -235,7 +279,7 @@ def build_rollout_records(
         for sample_index, (thought_gen_ids, suffix_group) in enumerate(zip(thought_outputs, suffix_outputs)):
             raw_thought = decode(tokenizer, thought_gen_ids)
             parsed = parse_thought_only(raw_thought)
-            thought_ids = encode(tokenizer, parsed["thought_text"].strip())
+            thought_ids = encode(tokenizer, parsed["thought_text"].strip())[: len(thought_gen_ids)]
             suffix_ids = suffix_group[0]
             predicted_suffix = decode(tokenizer, suffix_ids).strip()
             input_ids = prompt_ids + thought_ids + boundary_ids + suffix_ids
@@ -271,6 +315,18 @@ def build_rollout_records(
     return records, judge_rows
 
 
+def keep_complete_reward_groups(records: list[dict[str, Any]], samples_per_prefix: int) -> list[dict[str, Any]]:
+    by_prefix: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in records:
+        by_prefix[int(row["prefix_index"])].append(row)
+    kept: list[dict[str, Any]] = []
+    for group in by_prefix.values():
+        valid = [row for row in group if row["score"] in {0, 1}]
+        if len(valid) == samples_per_prefix:
+            kept.extend(sorted(valid, key=lambda row: int(row["sample_index"])))
+    return kept
+
+
 def save_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as f:
         for record in records:
@@ -284,9 +340,9 @@ def main() -> None:
     parser.add_argument("--config", default=None)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--output-dir", default=None)
-    parser.add_argument("--data-path", default="data/processed/interleaved_thinking.jsonl")
+    parser.add_argument("--data-path", default=None)
     parser.add_argument("--judge-endpoint", default="http://127.0.0.1:30000")
-    parser.add_argument("--judge-model", default="qwen-judge")
+    parser.add_argument("--judge-model", default="qwen36-35b-a3b")
     parser.add_argument("--seed", type=int, default=4337)
     parser.add_argument("--rl-split", choices=["train", "val"], default="train")
     parser.add_argument("--row-offset", type=int, default=4096)
@@ -305,7 +361,12 @@ def main() -> None:
     parser.add_argument("--max-grad-norm", type=float, default=0.1)
     parser.add_argument("--clip-eps", type=float, default=0.2)
     parser.add_argument("--kl-coef", type=float, default=0.02)
-    parser.add_argument("--advantage-eps", type=float, default=1e-6)
+    parser.add_argument(
+        "--normalizer-tokens",
+        type=int,
+        default=0,
+        help="Fixed Dr. GRPO loss denominator. Defaults to thought_max_new_tokens + suffix_tokens.",
+    )
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--judge-temperature", type=float, default=0.7)
@@ -315,6 +376,7 @@ def main() -> None:
     parser.add_argument("--min-available-mem-gib", type=float, default=4.0)
     parser.add_argument("--max-invalid-rate", type=float, default=0.05)
     parser.add_argument("--max-artifact-rate", type=float, default=0.10)
+    parser.add_argument("--max-near-zero-group-rate", type=float, default=0.50)
     parser.add_argument("--near-zero-worsen-pp", type=float, default=0.20)
     parser.add_argument("--max-length-growth", type=float, default=0.20)
     parser.add_argument(
@@ -329,6 +391,9 @@ def main() -> None:
     cfg = load_config(args.config or spec["config"])
     checkpoint = Path(args.checkpoint or spec["checkpoint"])
     output_dir = Path(args.output_dir or spec["output_dir"])
+    args.data_path = args.data_path or spec.get("data_path") or "data/processed/interleaved_thinking_rl.jsonl"
+    if args.normalizer_tokens <= 0:
+        args.normalizer_tokens = args.thought_max_new_tokens + args.suffix_tokens
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "resolved_args.json").write_text(json.dumps(vars(args), indent=2) + "\n", encoding="utf-8")
     (output_dir / "resolved_config.json").write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
@@ -410,26 +475,75 @@ def main() -> None:
             record["score"] = judgment["score"]
             record["raw_judge"] = judgment["raw_judge"]
 
-        valid_records = [row for row in records if row["score"] in {0, 1}]
+        invalid_judge_rate = safe_mean([float(row["score"] not in {0, 1}) for row in records])
+        valid_records = keep_complete_reward_groups(records, args.samples_per_prefix)
         if not valid_records:
-            stopped_reason = "all_judges_invalid"
+            stopped_reason = "no_complete_reward_groups"
             break
-        advantages, group_stats = group_advantages(valid_records, args.advantage_eps)
+        advantages, group_stats = group_advantages(valid_records)
         for record, advantage in zip(valid_records, advantages):
             record["advantage"] = advantage
 
+        pre_update_elapsed = time.time() - step_start
+        pre_summary = summarize_step(valid_records, group_stats, pre_update_elapsed, 0)
+        pre_summary["invalid_judge_rate"] = invalid_judge_rate
+        pre_summary["kept_complete_group_rate"] = len(group_stats) / max(1, args.prefixes_per_step)
+        mem = read_available_mem_gib()
+        if baseline_near_zero is None:
+            baseline_near_zero = pre_summary["near_zero_group_rate"]
+            baseline_total_tokens = pre_summary["avg_total_new_tokens"]
+        length_growth = (
+            pre_summary["avg_total_new_tokens"] / max(1e-6, float(baseline_total_tokens)) - 1.0
+            if baseline_total_tokens
+            else 0.0
+        )
+        pre_log_entry = {
+            "step": step,
+            "train_loss": None,
+            "policy_loss": None,
+            "kl": None,
+            "grad_norm": None,
+            "learning_rate": scheduler.get_last_lr()[0],
+            "available_mem_gib": mem,
+            "response_length_growth": length_growth,
+            "tokens_scored": 0,
+            "normalizer_tokens": args.normalizer_tokens,
+            "pre_update_gate": True,
+            **pre_summary,
+        }
+        pre_alerts, next_reward_collapse_streak = collect_stop_alerts(
+            pre_log_entry,
+            args,
+            mem,
+            length_growth,
+            float(baseline_near_zero),
+            reward_collapse_streak,
+        )
+        if args.enforce_stop_conditions and pre_alerts:
+            reward_collapse_streak = next_reward_collapse_streak
+            pre_log_entry["stop_alerts"] = pre_alerts
+            pre_log_entry["stop_conditions_enforced"] = True
+            print(json.dumps(pre_log_entry), flush=True)
+            all_logs.append(pre_log_entry)
+            save_jsonl(output_dir / f"step_{step:04d}_samples.jsonl", records)
+            stopped_reason = pre_alerts[0]
+            break
+
         input_ids, labels, attn = pad_training_batch(tokenizer, valid_records, device)
         with torch.no_grad():
-            old_logps, _ = sequence_logps(model, input_ids, labels, attn)
-            ref_logps, _ = sequence_logps(ref_model, input_ids, labels, attn)
-        new_logps, counts = sequence_logps(model, input_ids, labels, attn)
+            old_logps, token_mask, _ = token_logps(model, input_ids, labels, attn)
+            ref_logps, _, _ = token_logps(ref_model, input_ids, labels, attn)
+        new_logps, token_mask, counts = token_logps(model, input_ids, labels, attn)
         adv = torch.tensor(advantages, dtype=torch.float32, device=device)
         ratio = torch.exp((new_logps - old_logps).clamp(-20, 20))
         clipped_ratio = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps)
-        policy_loss = -torch.minimum(ratio * adv, clipped_ratio * adv).mean()
+        token_adv = adv.unsqueeze(1)
+        policy_obj = torch.minimum(ratio * token_adv, clipped_ratio * token_adv) * token_mask
+        policy_loss = -(policy_obj.sum(dim=1) / args.normalizer_tokens).mean()
         log_ratio_ref = (ref_logps - new_logps).clamp(-20, 20)
-        kl = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
-        loss = policy_loss + args.kl_coef * kl.mean()
+        kl_tokens = (torch.exp(log_ratio_ref) - log_ratio_ref - 1.0) * token_mask
+        kl_loss = (kl_tokens.sum(dim=1) / args.normalizer_tokens).mean()
+        loss = policy_loss + args.kl_coef * kl_loss
         if not torch.isfinite(loss):
             stopped_reason = "non_finite_loss"
             break
@@ -442,44 +556,30 @@ def main() -> None:
         elapsed = time.time() - step_start
         tokens_scored = int(counts.sum().detach().cpu())
         step_summary = summarize_step(valid_records, group_stats, elapsed, tokens_scored)
-        mem = read_available_mem_gib()
-        if baseline_near_zero is None:
-            baseline_near_zero = step_summary["near_zero_group_rate"]
-            baseline_total_tokens = step_summary["avg_total_new_tokens"]
-        length_growth = (
-            step_summary["avg_total_new_tokens"] / max(1e-6, float(baseline_total_tokens)) - 1.0
-            if baseline_total_tokens
-            else 0.0
-        )
+        step_summary["invalid_judge_rate"] = invalid_judge_rate
+        step_summary["kept_complete_group_rate"] = len(group_stats) / max(1, args.prefixes_per_step)
         log_entry = {
             "step": step,
             "train_loss": float(loss.detach().cpu()),
             "policy_loss": float(policy_loss.detach().cpu()),
-            "kl": float(kl.mean().detach().cpu()),
+            "kl": float(kl_loss.detach().cpu()),
             "grad_norm": float(grad_norm.detach().cpu()),
             "learning_rate": scheduler.get_last_lr()[0],
             "available_mem_gib": mem,
             "response_length_growth": length_growth,
             "tokens_scored": tokens_scored,
+            "normalizer_tokens": args.normalizer_tokens,
+            "pre_update_gate": False,
             **step_summary,
         }
-        stop_alerts = []
-        if mem >= 0 and mem < args.min_available_mem_gib:
-            stop_alerts.append("low_memory")
-        if log_entry["invalid_judge_rate"] > args.max_invalid_rate:
-            stop_alerts.append("judge_invalid_rate")
-        if log_entry["artifact_rate"] > args.max_artifact_rate:
-            stop_alerts.append("artifact_rate")
-        if length_growth > args.max_length_growth:
-            stop_alerts.append("response_length_growth")
-        if log_entry["near_zero_group_rate"] > baseline_near_zero + args.near_zero_worsen_pp:
-            stop_alerts.append("near_zero_group_worsened")
-        if log_entry["all_zero_group_rate"] >= 1.0 or log_entry["all_one_group_rate"] >= 1.0:
-            reward_collapse_streak += 1
-        else:
-            reward_collapse_streak = 0
-        if reward_collapse_streak >= 2:
-            stop_alerts.append("reward_collapsed")
+        stop_alerts, reward_collapse_streak = collect_stop_alerts(
+            log_entry,
+            args,
+            mem,
+            length_growth,
+            float(baseline_near_zero),
+            reward_collapse_streak,
+        )
         log_entry["stop_alerts"] = stop_alerts
         log_entry["stop_conditions_enforced"] = args.enforce_stop_conditions
         print(json.dumps(log_entry), flush=True)
@@ -507,9 +607,10 @@ def main() -> None:
         "history": all_logs,
         "paper_alignment": {
             "objective": "prefix -> generated thought -> predicted suffix -> binary judge reward on predicted suffix",
-            "optimizer": "small GRPO/DrGRPO-style clipped group-relative policy update with frozen SFT reference KL",
+            "optimizer": "Dr. GRPO-compatible clipped policy update: centered group returns, fixed token-budget log-prob normalization, no per-group std scaling, frozen SFT reference KL",
             "boundary": "two_stage_external_boundary; </think> is externally inserted and not rewarded directly",
             "data_split": "Uses the configured RL split/offset as the D_RL approximation; prefixes are built from augmented chunks and references are visible/raw suffix text after the thought boundary.",
+            "reward_variance_gate": "near-zero group std is logged and can stop the run, but std is not used to normalize the optimizer advantage.",
         },
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")

@@ -15,11 +15,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from common import jsonl_iter, load_config, now_run_id, safe_mean, set_seed
+from common import load_config, load_split_rows, now_run_id, safe_mean, set_seed
 from eval_reward_gate import JUDGE_PROMPT, build_eval_rows, parse_thought_only, word_count
 from eval_thinking import ARM_SPECS, decode, encode, judge_pointwise, load_model, load_tokenizer
 
-DEFAULT_ARMS = ["think_base", "think_phase3", "think_base_rlmt", "think_phase3_rlmt"]
+DEFAULT_ARMS = ["think_base", "think_self_improved", "think_base_rlmt", "think_self_improved_rlmt"]
 DEFAULT_CONDITIONS = ["normal_model_thought", "blank_thought", "generic_thought", "same_arm_swapped_thought"]
 GENERIC_THOUGHTS = [
     "Consider the local context and continue with a coherent relevant passage.",
@@ -294,7 +294,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--judge-endpoint", default="http://127.0.0.1:30000")
-    parser.add_argument("--judge-model", default="qwen-judge")
+    parser.add_argument("--judge-model", default="qwen36-35b-a3b")
     parser.add_argument("--seed", type=int, default=4337)
     parser.add_argument("--num-prefixes", type=int, default=32)
     parser.add_argument("--samples-per-prefix", type=int, default=4)
@@ -324,7 +324,11 @@ def main() -> None:
     set_seed(args.seed)
     cfg = load_config(ARM_SPECS[args.arms[0]]["config"])
     tokenizer = load_tokenizer(cfg)
-    rows = [row for row in jsonl_iter(cfg["data"]["interleaved_thinking_examples_jsonl"]) if row["split"] == "val"]
+    rows = load_split_rows(
+        cfg["data"]["interleaved_thinking_examples_jsonl"],
+        "val",
+        cfg["data"].get("heldout_examples_jsonl"),
+    )
     rng = random.Random(args.seed)
     rng.shuffle(rows)
     eval_rows = build_eval_rows(

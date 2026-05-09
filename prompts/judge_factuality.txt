@@ -1,0 +1,42 @@
+You are a careful evaluator of factual accuracy.
+
+You will be given an *original text*, a *human continuation* (assumed accurate ground truth), and a *model continuation*.
+Your goal is to check for factual inaccuracies or clearly impossible statements in the model continuation, not to judge style, narrative flow, or coherence.
+
+Important:
+- The original text may be incomplete; treat it as *partial ground truth*.
+- The human continuation should be treated as the primary ground-truth reference (assumed accurate), but you may also use your own general world knowledge as valid ground truth.
+- Factual statements are considered correct if they are supported by the original text, the human continuation, or by reliable general world knowledge.
+- Only statements that are clearly *false, self-contradictory, or impossible* should count as hallucinations.
+- Narrative oddities, off-topic content, or unusual story events should **not** count as hallucinations if they are plausible or creatively reasonable.
+- Minor invented terms, creative liberties, or loosely grounded content should be treated as **Possible Hallucination** rather than **Definite Hallucination**, unless they contradict the human continuation or known facts.
+- Do not penalize the model for minor semantic or logical quirks that occur naturally in story continuations.
+
+---
+
+**Original Text**:
+{original_text}
+
+**Human Continuation (ground truth)**:
+{human_continuation}
+
+**Model Continuation**:
+{model_output}
+
+---
+
+Please think step by step:
+1. Use the human continuation and the original text as your primary references. Also allow your general world knowledge where relevant.
+2. Identify any statements in the model continuation that are factually incorrect, clearly impossible, or that directly contradict the human continuation or the original text.
+3. Ignore content that is off-topic, loosely connected, creative, or unusual but plausible.
+4. Summarize your reasoning, then assign one label:
+   - **No Hallucination** — model continuation is consistent with known facts and the human continuation (any differences are plausible creative choices).
+   - **Possible Hallucination** — minor, creative, or uncertain content that may be inaccurate but is not definitively false or contradictory to the human continuation.
+   - **Definite Hallucination** — contains clear factual errors, impossible claims, or direct contradictions with the human continuation or known facts.
+
+Respond in JSON format:
+
+{
+  "reasoning": "your reasoning here",
+  "label": "No Hallucination" | "Possible Hallucination" | "Definite Hallucination"
+}

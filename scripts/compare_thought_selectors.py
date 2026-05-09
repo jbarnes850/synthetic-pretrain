@@ -22,7 +22,7 @@ from typing import Any
 
 import requests
 
-ARMS = ["think_base", "think_phase3", "think_base_rlmt", "think_phase3_rlmt"]
+ARMS = ["think_base", "think_self_improved", "think_base_rlmt", "think_self_improved_rlmt"]
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -372,7 +372,7 @@ def main() -> None:
     parser.add_argument("--arms", nargs="+", default=ARMS)
     parser.add_argument("--seed", type=int, default=4337)
     parser.add_argument("--selector-endpoint", default=None)
-    parser.add_argument("--selector-model", default="qwen-judge")
+    parser.add_argument("--selector-model", default="qwen36-35b-a3b")
     parser.add_argument("--selector-workers", type=int, default=16)
     parser.add_argument("--selector-temperature", type=float, default=0.0)
     parser.add_argument("--selector-max-tokens", type=int, default=96)

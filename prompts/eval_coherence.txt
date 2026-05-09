@@ -1,0 +1,24 @@
+You are evaluating repetition in two model continuations.
+
+Given the SAME context, continuation A and continuation B were generated.
+Your task is ONLY to judge which continuation contains LESS repetition.
+
+Repetition means:
+- repeated words or phrases
+- repeated n-grams
+- looping patterns
+- saying the same thing multiple times in different wording
+
+Context:
+{context}
+
+Continuation A:
+{model_A_output}
+
+Continuation B:
+{model_B_output}
+
+Respond EXACTLY with:
+"A" if A has less repetition
+"B" if B has less repetition
+"TIE" if they are about the same.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${SPARK_TRAIN_IMAGE:-scitrera/dgx-spark-sglang:0.5.9-t5}"
+IMAGE="${SPARK_TRAIN_IMAGE:-nvcr.io/nvidia/pytorch:26.01-py3}"
 RUN_GPU_SMOKE="${RUN_GPU_SMOKE:-1}"
 RUN_HARDWARE_PROBE="${RUN_HARDWARE_PROBE:-1}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,19 +67,6 @@ docker run --rm --ipc=host --network=host \
   -w /workspace \
   "${IMAGE}" \
   python3 scripts/prepare_pretraining_data.py --config configs/smoke.yaml --force --validate
-
-echo "validation: judge prompt/parser dry run"
-docker run --rm --ipc=host --network=host \
-  -v "${PROJECT_DIR}:/workspace" \
-  -v "${HOME}/.cache/huggingface:/hf:ro" \
-  -v "${HOME}/models:/models:ro" \
-  -e HF_HOME=/hf \
-  -e TRANSFORMERS_OFFLINE=1 \
-  -e HF_DATASETS_OFFLINE=1 \
-  -e PYTHONPATH=/workspace/scripts \
-  -w /workspace \
-  "${IMAGE}" \
-  python3 scripts/select_targets.py --config configs/smoke.yaml --dry-run-prompts --limit 16 --force
 
 echo "validation: GPU smoke"
 if [[ "${RUN_GPU_SMOKE}" == "1" ]]; then

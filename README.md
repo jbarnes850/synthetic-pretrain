@@ -1,130 +1,109 @@
 # Self-Improving Pretraining for Thinking Mid-Training
 
-[![Model](https://img.shields.io/badge/HuggingFace-Model-blue)](https://huggingface.co/Jarrodbarnes/qwen3-0.6B-interleaved-thinking)
-[![Dataset](https://img.shields.io/badge/HuggingFace-Dataset-blue)](https://huggingface.co/datasets/Jarrodbarnes/qwen3-0.6B-interleaved-thinking-data)
-[![Blog](https://img.shields.io/badge/Blog-Research%20Writeup-black)](https://jbarnes850.github.io/2026/04/27/self-improving-pretraining-thinking-midtraining/)
-[![License](https://img.shields.io/badge/License-Apache--2.0-lightgrey)](LICENSE)
+Public research code for a faithful small-scale experiment that combines:
 
-This repository contains the code release for a small-scale adaptation of Tan et al.'s self-improving pretraining and thinking mid-training pipeline to `Qwen/Qwen3-0.6B-Base`.
+1. Self-Improving Pretraining continued pretraining with Online DPO.
+2. RAM-style Thinking Mid-training data augmentation and SFT.
+3. RL mid-training on thought-conditioned suffix prediction.
+4. Reward-variance gates, causal thought probes, and reasoning evals.
 
-The experiment asks whether ordinary pretraining text can become a sequence of training environments before agentic post-training begins:
+The target run uses `Qwen/Qwen3.5-0.8B-Base` as the student and a stronger
+teacher/judge served through an OpenAI-compatible endpoint. The code is arranged
+around the recipe, not around an older release lineage.
 
-1. A prefix-suffix continuation-quality task for self-improving continued pretraining.
-2. An interleaved-thinking SFT task that teaches a short local thought interface.
-3. An RL mid-training task that rewards thought-conditioned suffix prediction.
-4. A causal thought-use probe that tests whether the thought text actually steers behavior.
+## Recipe
 
-The released model is not an instruction-tuned assistant. It is a research artifact for studying whether a small base model can be shaped into an emerging thought-conditioned continuation interface.
+```text
+FineWeb-Edu chunks
+  -> prefix/suffix examples
+  -> Self-Improving Pretraining continued pretraining
+  -> teacher-inserted interleaved thoughts
+  -> SFT/RL split
+  -> Thinking SFT from base and self-improved checkpoints
+  -> pre-RLMT reward-variance gate
+  -> RLMT on thought + suffix generations
+  -> causal thought probe and reasoning eval
+```
 
-## Release Links
+The SIP stage follows the paper's Online DPO suffix-vs-K-rollouts branch:
+sample K=16 rollouts from the current policy for each prefix, judge them in a
+full pairwise pool with the original suffix, then optimize chosen versus
+rejected continuations. The quality judge prompt in `prompts/judge_quality.txt`
+matches the prompt printed in the SIP paper. Teacher rewrites are available only
+as a separate ablation (`configs/self_improving_pretraining_rewrite.yaml`),
+where the pool is original suffix + rewrite + K=16 policy rollouts.
 
-| Artifact | Link |
-| --- | --- |
-| Blog post | <https://jbarnes850.github.io/2026/04/27/self-improving-pretraining-thinking-midtraining/> |
-| Model | <https://huggingface.co/Jarrodbarnes/qwen3-0.6B-interleaved-thinking> |
-| Dataset | <https://huggingface.co/datasets/Jarrodbarnes/qwen3-0.6B-interleaved-thinking-data> |
+The thinking stages follow the RAM
+mid-training object: augment raw chunks with interleaved thoughts, train SFT on
+one split, and run RLMT on a disjoint split where reward is assigned to the
+predicted suffix given prefix plus generated thought. RLMT uses a Dr. GRPO-style
+fixed-budget loss: centered returns within each prompt group, no reward-std
+normalization in the optimizer, and response-length tracking for correct and
+incorrect samples. The RAM paper specifies the RLMT reward object but does not
+publish a literal RLMT judge prompt; this code keeps the described reward
+contract rather than inventing a paper-quoted prompt.
 
 ## Repository Map
 
 ```text
 configs/
-  base.yaml                         Shared training/data/runtime defaults
-  self_improving_pretraining.yaml   Continued pretraining with Online DPO
-  thinking_sft_*.yaml               Matched SFT arms for raw and interleaved chunks
+  self_improving_pretraining.yaml   SIP continued-pretraining config
+  self_improving_pretraining_rewrite.yaml
+  thinking_sft_base.yaml            Thinking SFT from the base model
+  thinking_sft_self_improved.yaml   Thinking SFT from the SIP checkpoint
+  thinking_sft_raw_control.yaml     Raw-token budget control
 
 scripts/
-  prepare_pretraining_data.py       Materialize FineWeb-Edu prefix/suffix chunks
-  train.py                          Shared trainer for NTP, SFT, and Online DPO
-  train_dpo.py                      Online DPO helper code
+  check_models.py                   Offline student/teacher compatibility check
+  prepare_pretraining_data.py       FineWeb-Edu prefix/suffix materialization
+  build_rewrite_data.py             Teacher rewrite pool builder for ablation
   build_thinking_data.py            Teacher augmentation for interleaved thoughts
-  train_rlmt.py                     Small RLMT loop
-  eval_*.py                         Continuation, thinking, reward, and reasoning evals
+  split_midtraining_data.py         Disjoint SFT/RL/heldout split builder
+  train.py                          NTP, SFT, and Online DPO trainer
+  train_rlmt.py                     RLMT loop with reward-variance stop rules
+  eval_reward_gate.py               Pre/post-RLMT reward variance gate
   probe_thought_use.py              Causal thought-use intervention
   counterfactual_thought_bank_sglang.py
-                                    SGLang thought counterfactual bank
-  compare_thought_selectors.py      Selector diagnostic over oracle@16 thought bank
-  export_model.py                   Export a checkpoint as a Hugging Face model directory
-
-docs/
-  data_audit.md                     Dataset structure and caveats
-  results.md                        Release-facing results summary
-  thought_use_probe.md              Applied interpretability appendix
+  eval_thinking.py
+  eval_reasoning_sglang.py
+  run_pipeline.sh                   Stage launcher for Spark/container runs
 ```
 
-Large artifacts are intentionally not stored in this code repository. The model weights and dataset payload are released on Hugging Face.
+## Validation
 
-## Main Results
-
-| Stage | Primary evidence | Interpretation |
-| --- | --- | --- |
-| Continued pretraining | 81/128 held-out pairwise continuation wins over Qwen3-0.6B-Base | The self-improved checkpoint produced better judged continuations |
-| Interleaved-thinking SFT | Thought-token NLL dropped from 4.24 to 3.16 and 3.14 | SFT installed the thought interface |
-| RLMT reward gate | Self-improved RLMT reached the highest reward mean at 0.098 | RLMT made the interface rewardable under the suffix-prediction objective |
-| Thought-use probe | Swapped thoughts reduced reward to 0.016-0.023 | Thought text became a causal behavioral control surface |
-
-The downstream reasoning evaluation was mixed. This is a 0.6B model with a short 200-step RLMT run, so the right claim is narrow: the lifecycle is trainable at small scale, and the thought channel becomes behaviorally meaningful, but the model does not learn a mature agentic reasoning policy.
-
-A follow-up failure-localization diagnostic sharpened the thought-use result. Teacher thoughts improved reward in three of four arms, most clearly for the base RLMT lineage (`0.117` teacher-thought reward versus `0.016` own-sampled-thought reward). An oracle@16 over sampled model thoughts showed headroom, reaching `0.375` on the self-improved RLMT lineage, but a prefix-only LLM selector and a simple format heuristic failed to recover that headroom (`0.008` macro reward versus `0.021` random expected and `0.250` oracle@16). The interpretation is that the thought channel is real, but the 0.6B policy does not reliably author clean, policy-useful thoughts for itself.
-
-## Setup
-
-The original experiments ran in a Dockerized GPU environment with local Hugging Face caches. For code inspection, linting, and small local checks:
+Local static checks:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
 ruff check scripts
 python3 -m py_compile scripts/*.py
+bash -n scripts/run_pipeline.sh scripts/run_experiment.sh scripts/serve_judge.sh
 ```
 
-For the containerized validation path without spending GPU time:
+Container and GPU smoke tests should be staged before full runs:
 
 ```bash
-RUN_GPU_SMOKE=0 RUN_HARDWARE_PROBE=0 scripts/validate.sh
+scripts/run_pipeline.sh compat
+scripts/run_pipeline.sh prepare-corpus
+scripts/run_pipeline.sh sip-cpt
+scripts/run_pipeline.sh build-rewrites
+scripts/run_pipeline.sh sip-cpt-rewrite
+scripts/run_pipeline.sh build-thinking
+scripts/run_pipeline.sh split-thinking
+scripts/run_pipeline.sh sft-base
+scripts/run_pipeline.sh sft-self-improved
+scripts/run_pipeline.sh reward-gate-pre-rlmt
+scripts/run_pipeline.sh rlmt-base
+scripts/run_pipeline.sh rlmt-self-improved
+scripts/run_pipeline.sh reward-gate-post-rlmt
+scripts/run_pipeline.sh thinking-eval
 ```
 
-For an actual GPU smoke, set `RUN_GPU_SMOKE=1` and `RUN_HARDWARE_PROBE=1` in an environment with the expected CUDA container and mounted model/data caches.
+Do not skip the reward gate. RLMT should stop before expensive training if more
+than half of evaluated prefix groups have near-zero reward variance.
 
-## Minimal Reproduction Path
+## Claim Boundary
 
-The release keeps the lifecycle scripts separate so each claim is tied to a stage.
-
-```bash
-# 1. Prepare prefix/suffix pretraining chunks.
-python3 scripts/prepare_pretraining_data.py --config configs/self_improving_pretraining.yaml --force --validate
-
-# 2. Run self-improving continued pretraining.
-JUDGE_ENDPOINT=http://127.0.0.1:30000 JUDGE_MODEL=qwen-judge \
-  python3 scripts/train.py --config configs/self_improving_pretraining.yaml
-
-# 3. Build interleaved-thinking SFT data.
-python3 scripts/build_thinking_data.py \
-  --config configs/thinking_sft_base.yaml \
-  --input-jsonl data/processed/phase1_raw_examples.jsonl \
-  --output-jsonl data/processed/interleaved_thinking.jsonl
-
-# 4. Train matched SFT arms.
-python3 scripts/train.py --config configs/thinking_sft_base.yaml
-python3 scripts/train.py --config configs/thinking_sft_self_improved.yaml
-
-# 5. Run RLMT and the causal thought-use probe.
-python3 scripts/train_rlmt.py --arm think_phase3
-python3 scripts/probe_thought_use.py --arms think_base think_phase3 think_base_rlmt think_phase3_rlmt
-```
-
-The arm identifiers preserve the experiment lineage: `think_base` starts from Qwen3-0.6B-Base, `think_phase3` starts from the self-improved checkpoint, and `*_rlmt` denotes the corresponding RLMT arm.
-
-The exact public model and dataset are available from the Hugging Face links above.
-
-## Claim Boundaries
-
-This repository supports the blog's cautious claim: pretraining-style text can be wrapped into continuation selection, interleaved thought insertion, and thought-conditioned reward tasks before agentic post-training.
-
-It does not support broad claims about mature reasoning, production assistant behavior, or general RLMT scaling. The thought-use probe shows causal sensitivity to thought content, while also showing that sampled thoughts are not yet reliably better than blank or generic scaffolds at this scale.
-
-The counterfactual thought-bank and selector diagnostics reinforce that boundary: useful thoughts sometimes exist in the sampled distribution, but their usefulness is not recoverable from surface thought quality or prefix relevance alone.
-
-## Citation
-
-If this release is useful, cite the blog post and this repository. The upstream method is from Tan et al., *Self-Improving Pretraining*.
+This code is scoped to a faithful small-scale reproduction and failure-localized
+extension of the SIP plus Thinking Mid-training lifecycle. It is not a release
+of an instruction assistant, and it does not claim mature reasoning without the
+post-training stages and eval evidence needed to support that.

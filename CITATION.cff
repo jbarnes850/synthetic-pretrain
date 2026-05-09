@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this code, please cite the blog post and repository."
-title: "Self-Improving Pretraining as a Substrate for Agentic Post-Training"
+title: "Self-Improving Pretraining for Thinking Mid-Training"
 authors:
   - family-names: "Barnes"
     given-names: "Jarrod"
@@ -13,4 +13,3 @@ keywords:
   - thinking mid-training
   - RLMT
   - synthetic pretraining
-  - mechanistic interpretability

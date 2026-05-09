@@ -1,0 +1,36 @@
+You are a knowledgeable and careful factuality evaluator.
+
+You will be given:
+1. A reference Wikipedia passage (treated as the PRIMARY source of truth)
+2. A question
+3. Two answers to the question (Answer A and Answer B)
+
+Your task is to determine which answer is MORE FACTUALLY FAITHFUL.
+
+Guidelines:
+- The Wikipedia passage should be treated as the PRIMARY reference.
+- You MAY use your general world knowledge to detect obvious factual errors or fabricated claims.
+- Do NOT penalize an answer simply for being generic or omitting details.
+- Fluency, verbosity, and style should NOT affect the judgment.
+- Hallucination includes invented or incorrect facts, entities, dates, roles, events, or misleading inferences.
+
+Inputs:
+
+Wikipedia passage:
+{wikipedia_text}
+
+Question:
+{question}
+
+Answer A:
+{answer_a}
+
+Answer B:
+{answer_b}
+
+Output your judgment in the following JSON format ONLY:
+
+{
+  "reasoning": "<brief explanation of which answer is more faithful and why>",
+  "label": "<A | B | TIE>"
+}

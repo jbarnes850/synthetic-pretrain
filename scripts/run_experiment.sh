@@ -3,7 +3,7 @@ set -euo pipefail
 
 CONFIG="${1:-configs/self_improving_pretraining.yaml}"
 RUN_ID="${2:-$(basename "${CONFIG}" .yaml)-$(date -u +%Y%m%d-%H%M%S)}"
-IMAGE="${SPARK_TRAIN_IMAGE:-scitrera/dgx-spark-sglang:0.5.9-t5}"
+IMAGE="${SPARK_TRAIN_IMAGE:-nvcr.io/nvidia/pytorch:26.01-py3}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${PROJECT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
@@ -23,6 +23,15 @@ cfg = load_config(sys.argv[1])
 print(cfg["train"]["condition"])
 PY
 )"
+PREPARE_DATA="$(PYTHONPATH="${PROJECT_DIR}/scripts" python3 - "${CONFIG}" <<'PY'
+from common import load_config
+import sys
+cfg = load_config(sys.argv[1])
+condition = cfg["train"]["condition"]
+include_rewrite = bool(cfg["train"].get("include_rewrite_candidate", False))
+print("1" if condition in {"raw_ntp", "online_dpo_selfimproving"} and not include_rewrite else "0")
+PY
+)"
 mkdir -p "${OUTPUT_DIR}"
 WORKER_DIR="${PROJECT_DIR}/workers/${SPARK_WORKER_NAME:-local}/${RUN_ID}"
 mkdir -p "${WORKER_DIR}"
@@ -30,6 +39,7 @@ mkdir -p "${WORKER_DIR}"
 echo "run_experiment: project=${PROJECT_DIR}"
 echo "run_experiment: config=${CONFIG}"
 echo "run_experiment: condition=${CONDITION}"
+echo "run_experiment: prepare_data=${PREPARE_DATA}"
 echo "run_experiment: run_id=${RUN_ID}"
 echo "run_experiment: image=${IMAGE}"
 echo "run_experiment: log=${RUN_LOG}"
@@ -49,9 +59,10 @@ docker run --rm --gpus all --ipc=host --network=host \
   -e JUDGE_MODEL="${JUDGE_MODEL:-}" \
   -e SPARK_SKIP_SELECT="${SPARK_SKIP_SELECT:-0}" \
   -e CONDITION="${CONDITION}" \
+  -e PREPARE_DATA="${PREPARE_DATA}" \
   -w /workspace \
   "${IMAGE}" \
-  bash -lc "set -euo pipefail && python3 scripts/prepare_pretraining_data.py --config '${CONFIG}' --force && if [[ \"\${SPARK_SKIP_SELECT}\" != \"1\" && \"\${CONDITION}\" != \"online_dpo_selfimproving\" ]]; then python3 scripts/select_targets.py --config '${CONFIG}' --force; else echo 'run_experiment: skipping target selection'; fi && python3 scripts/train.py --config '${CONFIG}' 2>&1 | tee '${OUTPUT_DIR}/train.log'" \
+  bash -lc "set -euo pipefail && if [[ \"\${PREPARE_DATA}\" == \"1\" ]]; then python3 scripts/prepare_pretraining_data.py --config '${CONFIG}' --force; else echo 'run_experiment: skipping prepare_pretraining_data for condition='\"\${CONDITION}\"; fi && python3 scripts/train.py --config '${CONFIG}' 2>&1 | tee '${OUTPUT_DIR}/train.log'" \
   2>&1 | tee "${RUN_LOG}"
 
 metrics_path="$(PYTHONPATH="${PROJECT_DIR}/scripts" python3 - "${CONFIG}" <<'PY'

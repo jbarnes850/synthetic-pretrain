@@ -18,10 +18,10 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from common import jsonl_iter, load_config, now_run_id, safe_mean, set_seed
+from common import load_config, load_split_rows, now_run_id, safe_mean, set_seed
 from eval_thinking import ARM_SPECS, decode, encode, judge_pointwise, load_model, load_tokenizer
 
-DEFAULT_THINK_ARMS = ["think_base", "think_phase3"]
+DEFAULT_THINK_ARMS = ["think_base", "think_self_improved"]
 
 JUDGE_PROMPT = """You are judging a reward for thinking mid-training.
 
@@ -261,9 +261,9 @@ def compare_arms(records_by_arm: dict[str, list[dict[str, Any]]]) -> dict[str, A
                 grouped[int(row["prefix_index"])].append(float(row["score"]))
         means_by_arm[arm] = {idx: safe_mean(vals) for idx, vals in grouped.items() if vals}
     base = means_by_arm.get("think_base", {})
-    phase3 = means_by_arm.get("think_phase3", {})
-    shared = sorted(set(base) & set(phase3))
-    deltas = [phase3[idx] - base[idx] for idx in shared]
+    self_improved = means_by_arm.get("think_self_improved", {})
+    shared = sorted(set(base) & set(self_improved))
+    deltas = [self_improved[idx] - base[idx] for idx in shared]
     pairwise: dict[str, Any] = {}
     for left in sorted(means_by_arm):
         for right in sorted(means_by_arm):
@@ -280,8 +280,8 @@ def compare_arms(records_by_arm: dict[str, list[dict[str, Any]]]) -> dict[str, A
             }
     return {
         "shared_prefixes": len(shared),
-        "mean_phase3_minus_base_reward": safe_mean(deltas),
-        "phase3_better_prefix_rate": safe_mean([float(delta > 0) for delta in deltas]),
+        "mean_self_improved_minus_base_reward": safe_mean(deltas),
+        "self_improved_better_prefix_rate": safe_mean([float(delta > 0) for delta in deltas]),
         "base_better_prefix_rate": safe_mean([float(delta < 0) for delta in deltas]),
         "tie_prefix_rate": safe_mean([float(abs(delta) < 1e-9) for delta in deltas]),
         "pairwise": pairwise,
@@ -383,7 +383,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--judge-endpoint", default="http://127.0.0.1:30000")
-    parser.add_argument("--judge-model", default="qwen-judge")
+    parser.add_argument("--judge-model", default="qwen36-35b-a3b")
     parser.add_argument("--seed", type=int, default=4337)
     parser.add_argument("--num-prefixes", type=int, default=32)
     parser.add_argument("--samples-per-prefix", type=int, default=4)
@@ -425,7 +425,11 @@ def main() -> None:
     set_seed(args.seed)
     cfg = load_config(ARM_SPECS[args.arms[0]]["config"])
     tokenizer = load_tokenizer(cfg)
-    rows = [row for row in jsonl_iter(cfg["data"]["interleaved_thinking_examples_jsonl"]) if row["split"] == "val"]
+    rows = load_split_rows(
+        cfg["data"]["interleaved_thinking_examples_jsonl"],
+        "val",
+        cfg["data"].get("heldout_examples_jsonl"),
+    )
     rng = random.Random(args.seed)
     rng.shuffle(rows)
     eval_rows = build_eval_rows(
@@ -458,7 +462,7 @@ def main() -> None:
             "source": "Tan et al. Section 2 RLMT: prefix -> generated thinking + predicted suffix; LLM judge compares predicted suffix to held-out suffix and returns binary reward.",
             "scaled_gate": "Small held-out validation batch with multiple stochastic samples per prefix; no policy update is performed.",
             "reward_variance_gate": "Before GRPO/DrGRPO-style training, groups with reward std < 1e-5 should not dominate.",
-            "two_stage_note": "two_stage_external_boundary samples tau_hat first, externally inserts the thought/suffix boundary, then samples s_hat; this preserves the paper's reward object while avoiding XML-boundary brittleness in a 0.6B base model.",
+            "two_stage_note": "two_stage_external_boundary samples tau_hat first, externally inserts the thought/suffix boundary, then samples s_hat; this preserves the paper's reward object while avoiding XML-boundary brittleness.",
         },
         "num_eval_prefixes": len(eval_rows),
         "arms": {},
@@ -548,13 +552,13 @@ def main() -> None:
         "reward_validity_ok": all(arm["invalid_rate"] <= 0.05 for arm in summary["arms"].values()),
         "variance_ok": all(rate <= 0.50 for rate in near_zero_rates),
     }
-    if "think_base" in summary["arms"] and "think_phase3" in summary["arms"]:
-        summary["go_no_go"]["phase3_more_reward_separable"] = (
-            summary["arms"]["think_phase3"]["mean_group_std"] > summary["arms"]["think_base"]["mean_group_std"]
-            or summary["arms"]["think_phase3"]["mixed_group_rate"] > summary["arms"]["think_base"]["mixed_group_rate"]
+    if "think_base" in summary["arms"] and "think_self_improved" in summary["arms"]:
+        summary["go_no_go"]["self_improved_more_reward_separable"] = (
+            summary["arms"]["think_self_improved"]["mean_group_std"] > summary["arms"]["think_base"]["mean_group_std"]
+            or summary["arms"]["think_self_improved"]["mixed_group_rate"] > summary["arms"]["think_base"]["mixed_group_rate"]
         )
-        summary["go_no_go"]["phase3_higher_mean_reward"] = (
-            summary["arm_comparison"]["mean_phase3_minus_base_reward"] > 0
+        summary["go_no_go"]["self_improved_higher_mean_reward"] = (
+            summary["arm_comparison"]["mean_self_improved_minus_base_reward"] > 0
         )
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)

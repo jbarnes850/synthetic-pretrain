@@ -1,19 +1,13 @@
-Prompt-Version: quality_v1
-
-I have an original text fragment and two candidate continuations that follow it.
+I have an original text fragment and 2 generated continuations that follow the original text fragment.
 
 Original text fragment:
+
 {prefix}
 
-Option 1:
-{candidate_a}
+Option 1: {candidate_a}
 
-Option 2:
-{candidate_b}
+Option 2: {candidate_b}
 
-Judge which continuation is more coherent with the fragment. If both continuations are coherent, choose the one that is more factual, information-dense, and otherwise higher quality. Ignore whether a continuation feels incomplete, and do not prefer a candidate merely because it exactly matches the source.
-
-Think internally. Return exactly one compact JSON object and no other text:
-{{"winner":"A"}}
-or
-{{"winner":"B"}}
+Judge which continuation is more coherent.
+If both continuations are coherent, choose the one that is more factual and otherwise high quality. Ignore whether continuations feel incomplete.
+In the final paragraph, output "Conclusion: Option 1" if you think option 1 is better otherwise output "Conclusion: Option 2".

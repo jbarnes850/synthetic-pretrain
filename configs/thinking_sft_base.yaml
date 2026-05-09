@@ -1,10 +1,14 @@
 include: configs/base.yaml
 
-# Control: untouched Qwen3-0.6B-Base SFT on paper-aligned
-# interleaved teacher-thought augmented pretraining chunks.
+# RAM Thinking Mid-training SFT arm initialized from the base model.
+# Trains with next-token prediction on the SFT split of the interleaved corpus.
 
 project:
-  seed: 4337
+  seed: 9337
+
+runtime:
+  dtype: bfloat16
+  device: cuda
 
 model:
   hidden_size: null
@@ -17,14 +21,14 @@ model:
 
 train:
   condition: interleaved_thinking_sft
-  init_from_pretrained: /hf/hub/models--Qwen--Qwen3-0.6B-Base/snapshots/da87bfb608c14b7cf20ba1ce41287e8de496c0cd
+  init_from_pretrained: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
   output_dir: outputs/thinking_sft_base
-  max_steps: 512
-  eval_every: 128
+  max_steps: 2048
+  eval_every: 256
   log_every: 32
-  save_every: 256
+  save_every: 512
   learning_rate: 0.000005
-  warmup_steps: 50
+  warmup_steps: 100
   min_lr_ratio: 0.1
   weight_decay: 0.1
   max_grad_norm: 1.0
@@ -32,8 +36,9 @@ train:
   grad_accum_steps: 4
 
 data:
-  examples_jsonl: data/processed/interleaved_thinking.jsonl
-  raw_examples_jsonl: data/processed/interleaved_thinking.jsonl
-  selected_jsonl: data/processed/interleaved_thinking.jsonl
-  thinking_examples_jsonl: data/processed/interleaved_thinking.jsonl
-  interleaved_thinking_examples_jsonl: data/processed/interleaved_thinking.jsonl
+  tokenizer_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
+  config_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
+  examples_jsonl: data/processed/interleaved_thinking_sft.jsonl
+  raw_examples_jsonl: data/processed/interleaved_thinking_sft.jsonl
+  interleaved_thinking_examples_jsonl: data/processed/interleaved_thinking_sft.jsonl
+  heldout_examples_jsonl: data/processed/interleaved_thinking_heldout.jsonl

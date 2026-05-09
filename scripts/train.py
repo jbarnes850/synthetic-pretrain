@@ -9,9 +9,18 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from common import emit_metric, jsonl_iter, latest_snapshot, load_config, read_available_mem_gib, safe_mean, set_seed
+from common import (
+    emit_metric,
+    jsonl_iter,
+    latest_snapshot,
+    load_config,
+    load_split_rows,
+    read_available_mem_gib,
+    resolve_hf_path,
+    safe_mean,
+    set_seed,
+)
 from self_improving import (
-    build_rollout_vs_rewrite_batch,
     collate_rollout_raw,
     load_prompt_template,
 )
@@ -60,18 +69,6 @@ class SuffixDataset(Dataset):
             prefix = row["prefix_ids"]
             suffix = row["original_suffix_ids"]
             chosen = "original"
-        elif self.condition == "finephrase_math_ntp":
-            prefix = row["prefix_ids"]
-            suffix = row["finephrase_suffix_ids"]
-            chosen = "finephrase"
-        elif self.condition == "rfnll_original_vs_finephrase":
-            prefix = row["prefix_ids"]
-            suffix = row["chosen_suffix_ids"]
-            chosen = row.get("chosen", "selected")
-        elif self.condition == "thinking_sft":
-            prefix = row["prefix_ids"]
-            suffix = row["thinking_suffix_ids"]
-            chosen = "thinking"
         elif self.condition == "interleaved_thinking_sft":
             prefix = []
             suffix = row["interleaved_thinking_ids"]
@@ -80,16 +77,10 @@ class SuffixDataset(Dataset):
             prefix = []
             suffix = row["raw_chunk_ids"]
             chosen = "raw_chunk"
-        elif self.condition == "rfnll_rollout_vs_rewrite":
-            return {
-                "prefix_ids": list(row["prefix_ids"]),
-                "rewrite_suffix_ids": list(row["finephrase_suffix_ids"]),
-                "original_suffix_ids": list(row["original_suffix_ids"]),
-            }
         elif self.condition == "online_dpo_selfimproving":
             return {
                 "prefix_ids": list(row["prefix_ids"]),
-                "rewrite_suffix_ids": list(row["finephrase_suffix_ids"]),
+                "rewrite_suffix_ids": list(row.get("rewrite_suffix_ids", [])),
                 "original_suffix_ids": list(row["original_suffix_ids"]),
             }
         else:
@@ -127,20 +118,12 @@ def load_rows(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     condition = cfg["train"]["condition"]
     if condition == "raw_ntp":
         path = cfg["data"].get("raw_examples_jsonl", cfg["data"]["examples_jsonl"])
-    elif condition == "finephrase_math_ntp":
-        path = cfg["data"]["examples_jsonl"]
-    elif condition == "rfnll_original_vs_finephrase":
-        path = cfg["data"]["selected_jsonl"]
-    elif condition == "thinking_sft":
-        path = cfg["data"].get("thinking_examples_jsonl", cfg["data"]["examples_jsonl"])
     elif condition == "interleaved_thinking_sft":
         path = cfg["data"].get("interleaved_thinking_examples_jsonl", cfg["data"]["examples_jsonl"])
     elif condition == "raw_chunk_ntp":
         path = cfg["data"].get("interleaved_thinking_examples_jsonl", cfg["data"]["examples_jsonl"])
-    elif condition == "rfnll_rollout_vs_rewrite":
-        path = cfg["data"]["examples_jsonl"]
     elif condition == "online_dpo_selfimproving":
-        path = cfg["data"]["examples_jsonl"]
+        path = cfg["data"].get("online_dpo_examples_jsonl", cfg["data"]["examples_jsonl"])
     else:
         raise ValueError(f"Unknown train.condition={condition!r}")
     rows = list(jsonl_iter(path))
@@ -162,11 +145,11 @@ def build_model(cfg: dict[str, Any], tokenizer) -> torch.nn.Module:
     # Path A: continual pretraining from a public HF checkpoint.
     # Loads native architecture + pretrained weights in one call. cfg.model
     # dimension overrides are ignored — the pretrained weights dictate shape.
-    init_from_pretrained = cfg["train"].get("init_from_pretrained")
+    init_from_pretrained = os.environ.get("SPARK_INIT_FROM_PRETRAINED") or cfg["train"].get("init_from_pretrained")
     if init_from_pretrained:
         dtype = torch.bfloat16 if cfg["runtime"].get("dtype") == "bfloat16" else torch.float32
         model = AutoModelForCausalLM.from_pretrained(
-            init_from_pretrained,
+            resolve_hf_path(init_from_pretrained),
             local_files_only=True,
             trust_remote_code=True,
             torch_dtype=dtype,
@@ -259,17 +242,27 @@ def main() -> None:
         device = torch.device(f"cuda:{local_rank}")
     else:
         device = torch.device("cpu")
-    tokenizer_path = latest_snapshot(cfg["data"]["tokenizer_repo_cache"])
+    tokenizer_path = resolve_hf_path(cfg["data"]["tokenizer_repo_cache"])
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     rows = load_rows(cfg)
     oracle_rows = list(jsonl_iter(cfg["data"].get("raw_examples_jsonl", cfg["data"]["examples_jsonl"])))
+    heldout_path = cfg["data"].get("heldout_examples_jsonl")
     train_rows = [r for r in rows if r["split"] == "train"]
-    val_rows = [r for r in rows if r["split"] == "val"] or train_rows[: max(1, min(32, len(train_rows)))]
-    oracle_train_rows = [r for r in oracle_rows if r["split"] == "train"]
-    oracle_val_rows = [r for r in oracle_rows if r["split"] == "val"] or oracle_train_rows[: max(1, min(32, len(oracle_train_rows)))]
+    val_rows = [r for r in rows if r["split"] == "val"]
+    if not val_rows and heldout_path:
+        val_rows = load_split_rows(heldout_path, "val")
+    oracle_val_rows = [r for r in oracle_rows if r["split"] == "val"]
+    if not oracle_val_rows and heldout_path:
+        oracle_val_rows = load_split_rows(heldout_path, "val")
+    if not train_rows:
+        raise RuntimeError("No training rows found for configured dataset")
+    if not val_rows:
+        raise RuntimeError("No validation rows found. Provide split=val rows or data.heldout_examples_jsonl.")
+    if not oracle_val_rows:
+        raise RuntimeError("No oracle validation rows found. Provide split=val rows or data.heldout_examples_jsonl.")
     condition = cfg["train"]["condition"]
 
     train_ds = SuffixDataset(train_rows, condition)
@@ -287,7 +280,7 @@ def main() -> None:
             seed=int(cfg["project"]["seed"]),
         )
 
-    if condition in ("rfnll_rollout_vs_rewrite", "online_dpo_selfimproving"):
+    if condition == "online_dpo_selfimproving":
         train_loader = DataLoader(
             train_ds,
             batch_size=int(cfg["train"]["batch_size"]),
@@ -322,24 +315,22 @@ def main() -> None:
         raise RuntimeError("Train loader is empty")
 
     judge_endpoint = os.environ.get("JUDGE_ENDPOINT") or cfg.get("selection", {}).get("judge_endpoint")
-    judge_model = os.environ.get("JUDGE_MODEL") or cfg.get("selection", {}).get("judge_model", "qwen-judge")
+    judge_model = os.environ.get("JUDGE_MODEL") or cfg.get("selection", {}).get("judge_model", "qwen36-35b-a3b")
     judge_temperature = float(cfg.get("selection", {}).get("judge_temperature", 0.7))
     judge_top_p = float(cfg.get("selection", {}).get("judge_top_p", 0.6))
     judge_max_tokens = int(cfg.get("selection", {}).get("judge_max_tokens", 64))
-    judge_repeats = int(cfg.get("selection", {}).get("judge_repeats", 1))
     judge_max_workers = int(cfg.get("selection", {}).get("judge_max_workers", 16))
     prompt_path = cfg.get("selection", {}).get("prompt_path", "prompts/judge_quality.txt")
-    prompt_template = load_prompt_template(prompt_path) if condition == "rfnll_rollout_vs_rewrite" else ""
+    prompt_template = ""
     rollout_max_new_tokens = int(cfg["data"]["suffix_tokens"])
     rollout_temperature = float(cfg.get("selection", {}).get("rollout_temperature", 1.0))
     rollout_top_p = float(cfg.get("selection", {}).get("rollout_top_p", 1.0))
-    if condition == "rfnll_rollout_vs_rewrite" and not (judge_endpoint and judge_model):
-        raise ValueError("rfnll_rollout_vs_rewrite requires JUDGE_ENDPOINT and judge_model")
     if condition == "online_dpo_selfimproving" and not (judge_endpoint and judge_model):
         raise ValueError("online_dpo_selfimproving requires JUDGE_ENDPOINT and judge_model")
 
     dpo_beta = float(os.environ.get("SPARK_DPO_BETA", cfg["train"].get("dpo_beta", 0.1)))
     num_rollouts = int(cfg["train"].get("num_rollouts", 16))
+    include_rewrite_candidate = bool(cfg["train"].get("include_rewrite_candidate", False))
     min_lr_ratio = float(cfg["train"].get("min_lr_ratio", 0.0))
     # Paper §1.2.2 continual: pivot_source = original suffix. Build a loader
     # whose collate still returns raw prefix/rewrite/original; build_online_dpo_batch
@@ -351,7 +342,7 @@ def main() -> None:
     if cfg["runtime"].get("dtype") == "bfloat16" and device.type == "cuda":
         model = model.to(dtype=torch.bfloat16)
 
-    init_from_pretrained = cfg["train"].get("init_from_pretrained")
+    init_from_pretrained = os.environ.get("SPARK_INIT_FROM_PRETRAINED") or cfg["train"].get("init_from_pretrained")
     init_ckpt = cfg["train"].get("init_from_checkpoint") or os.environ.get("INIT_FROM_CHECKPOINT")
     if init_from_pretrained:
         if is_main:
@@ -418,8 +409,6 @@ def main() -> None:
     tokens_seen = 0
     step = 0
     running = []
-    rollout_chosen_total = 0
-    rollout_total = 0
     judge_latency_total = 0.0
     gen_latency_total = 0.0
     # DPO accumulators (only used when condition == online_dpo_selfimproving)
@@ -427,7 +416,13 @@ def main() -> None:
     dpo_kept_prefixes = 0
     dpo_chosen_is_pivot = 0
     dpo_rejected_is_pivot = 0
+    dpo_chosen_is_rewrite = 0
+    dpo_rejected_is_rewrite = 0
+    dpo_chosen_is_rollout = 0
+    dpo_rejected_is_rollout = 0
     dpo_pivot_pointwise_sum = 0.0
+    dpo_rewrite_pointwise_sum = 0.0
+    dpo_rewrite_available = 0
     dpo_rollout_pointwise_sum = 0.0
     dpo_pool_top_score_sum = 0.0
     dpo_pool_bottom_score_sum = 0.0
@@ -452,38 +447,7 @@ def main() -> None:
                     train_sampler.set_epoch(epoch)
                 train_iter = iter(train_loader)
                 batch = next(train_iter)
-            if condition == "rfnll_rollout_vs_rewrite":
-                batch, roll_stats = build_rollout_vs_rewrite_batch(
-                    batch,
-                    model,
-                    tokenizer,
-                    prompt_template,
-                    judge_endpoint,
-                    judge_model,
-                    judge_temperature,
-                    judge_top_p,
-                    judge_max_tokens,
-                    judge_repeats,
-                    judge_max_workers,
-                    rollout_max_new_tokens,
-                    pad_id,
-                    device,
-                    step * grad_accum + rollout_total // max(1, int(cfg["train"]["batch_size"])),
-                    rollout_temperature=rollout_temperature,
-                    rollout_top_p=rollout_top_p,
-                )
-                rollout_chosen_total += roll_stats["rollout_chosen"]
-                rollout_total += roll_stats["total"]
-                judge_latency_total += roll_stats["judge_latency_s"]
-                gen_latency_total += roll_stats["gen_latency_s"]
-                out = model(**batch)
-                if not torch.isfinite(out.loss):
-                    raise RuntimeError(f"non-finite training loss at step={step + 1}: {float(out.loss.detach().cpu())}")
-                loss = out.loss / grad_accum
-                loss.backward()
-                accum_loss += float(loss.detach().cpu())
-                tokens_seen += int(batch["attention_mask"].sum().detach().cpu())
-            elif condition == "online_dpo_selfimproving":
+            if condition == "online_dpo_selfimproving":
                 micro_step_id = step * grad_accum + dpo_micro_steps
                 # Pass the unwrapped policy for rollout generation so we never
                 # touch DDP's forward hooks from generate(); the policy forward
@@ -509,14 +473,23 @@ def main() -> None:
                     rollout_temperature=rollout_temperature,
                     rollout_top_p=rollout_top_p,
                     rank=rank,
+                    include_rewrite_candidate=include_rewrite_candidate,
                 )
                 dpo_total_prefixes += dpo_stats["total"]
                 judge_latency_total += dpo_stats["judge_latency_s"]
                 gen_latency_total += dpo_stats["gen_latency_s"]
                 dpo_pivot_pointwise_sum += dpo_stats["pivot_pointwise_mean"] * dpo_stats["total"]
+                dpo_rewrite_pointwise_sum += dpo_stats["rewrite_pointwise_mean"] * dpo_stats["rewrite_available_count"]
+                dpo_rewrite_available += dpo_stats["rewrite_available_count"]
                 dpo_rollout_pointwise_sum += dpo_stats["rollout_pointwise_mean"] * dpo_stats["total"]
                 dpo_pool_top_score_sum += dpo_stats["pool_top_score_mean"] * dpo_stats["total"]
                 dpo_pool_bottom_score_sum += dpo_stats["pool_bottom_score_mean"] * dpo_stats["total"]
+                candidate_audit_records = dpo_stats.pop("candidate_audit_records", [])
+                if is_main and candidate_audit_records:
+                    audit_path = output_dir / "candidate_pool_audit.jsonl"
+                    with audit_path.open("a", encoding="utf-8") as f:
+                        for record in candidate_audit_records:
+                            f.write(json.dumps(record, separators=(",", ":")) + "\n")
                 if dpo_batch is None:
                     # Unreachable with K >= 1 and {0,1} scores, but keep DDP safe.
                     dpo_micro_steps += 1
@@ -524,6 +497,10 @@ def main() -> None:
                 dpo_kept_prefixes += dpo_stats["kept"]
                 dpo_chosen_is_pivot += dpo_stats["chosen_is_pivot_count"]
                 dpo_rejected_is_pivot += dpo_stats["rejected_is_pivot_count"]
+                dpo_chosen_is_rewrite += dpo_stats["chosen_is_rewrite_count"]
+                dpo_rejected_is_rewrite += dpo_stats["rejected_is_rewrite_count"]
+                dpo_chosen_is_rollout += dpo_stats["chosen_is_rollout_count"]
+                dpo_rejected_is_rollout += dpo_stats["rejected_is_rollout_count"]
 
                 # One stacked policy forward through the DDP-wrapped model.
                 stacked_ids = torch.cat(
@@ -584,19 +561,19 @@ def main() -> None:
                     "tok_per_sec": tokens_seen / elapsed,
                     "available_mem_gib": mem,
                 }
-                if condition == "rfnll_rollout_vs_rewrite" and rollout_total > 0:
-                    log_entry["chosen_rollout_rate"] = rollout_chosen_total / rollout_total
-                    log_entry["judge_latency_s_avg"] = judge_latency_total / max(1, step * grad_accum)
-                    log_entry["gen_latency_s_avg"] = gen_latency_total / max(1, step * grad_accum)
                 if condition == "online_dpo_selfimproving" and dpo_total_prefixes > 0:
                     log_entry["pivot_pointwise_mean"] = dpo_pivot_pointwise_sum / dpo_total_prefixes
+                    log_entry["rewrite_pointwise_mean"] = dpo_rewrite_pointwise_sum / max(1, dpo_rewrite_available)
                     log_entry["rollout_pointwise_mean"] = dpo_rollout_pointwise_sum / dpo_total_prefixes
                     log_entry["pool_top_score_mean"] = dpo_pool_top_score_sum / dpo_total_prefixes
                     log_entry["pool_bottom_score_mean"] = dpo_pool_bottom_score_sum / dpo_total_prefixes
                     if dpo_kept_prefixes > 0:
                         log_entry["chosen_is_pivot_rate"] = dpo_chosen_is_pivot / dpo_kept_prefixes
+                        log_entry["chosen_is_rewrite_rate"] = dpo_chosen_is_rewrite / dpo_kept_prefixes
+                        log_entry["chosen_is_rollout_rate"] = dpo_chosen_is_rollout / dpo_kept_prefixes
                         log_entry["rejected_is_pivot_rate"] = dpo_rejected_is_pivot / dpo_kept_prefixes
-                        log_entry["chosen_is_rollout_rate"] = 1.0 - (dpo_chosen_is_pivot / dpo_kept_prefixes)
+                        log_entry["rejected_is_rewrite_rate"] = dpo_rejected_is_rewrite / dpo_kept_prefixes
+                        log_entry["rejected_is_rollout_rate"] = dpo_rejected_is_rollout / dpo_kept_prefixes
                     if dpo_micro_steps > 0:
                         log_entry["dpo_margin_avg"] = dpo_margin_sum / dpo_micro_steps
                         log_entry["dpo_chosen_beats_rejected_rate"] = dpo_acc_sum / dpo_micro_steps
@@ -640,18 +617,10 @@ def main() -> None:
     for r in val_rows[:256]:
         if condition == "raw_ntp":
             suffixes.append(r["original_suffix_ids"])
-        elif condition == "finephrase_math_ntp":
-            suffixes.append(r["finephrase_suffix_ids"])
-        elif condition == "rfnll_original_vs_finephrase":
-            suffixes.append(r["chosen_suffix_ids"])
-        elif condition == "thinking_sft":
-            suffixes.append(r["thinking_suffix_ids"])
         elif condition == "interleaved_thinking_sft":
             suffixes.append(r["interleaved_thinking_ids"])
         elif condition == "raw_chunk_ntp":
             suffixes.append(r["raw_chunk_ids"])
-        elif condition == "rfnll_rollout_vs_rewrite":
-            suffixes.append(r["original_suffix_ids"])
         elif condition == "online_dpo_selfimproving":
             suffixes.append(r["original_suffix_ids"])
         else:
@@ -660,30 +629,16 @@ def main() -> None:
 
     total_chosen = sum(val_counts.values())
     chosen_original = val_counts.get("original", 0) / max(1, total_chosen)
-    chosen_finephrase = val_counts.get("finephrase", 0) / max(1, total_chosen)
     chosen_rollout = val_counts.get("rollout", 0) / max(1, total_chosen)
-    if condition == "rfnll_rollout_vs_rewrite":
-        chosen_rollout = rollout_chosen_total / max(1, rollout_total)
-        chosen_finephrase = 1.0 - chosen_rollout
-        chosen_original = 0.0
-        judge_win_rate = chosen_rollout
-        val_loss_selected = val_loss_raw
-    elif condition == "online_dpo_selfimproving":
-        chosen_rollout = 1.0 - (dpo_chosen_is_pivot / max(1, dpo_kept_prefixes))
+    if condition == "online_dpo_selfimproving":
+        chosen_rollout = dpo_chosen_is_rollout / max(1, dpo_kept_prefixes)
         chosen_original = dpo_chosen_is_pivot / max(1, dpo_kept_prefixes)
-        chosen_finephrase = 0.0
-        # Paper §1.2.2 "Suffix & rewrite vs. rollouts" (p.12 Fig 8): early in
-        # training the judge picks the original suffix (pivot) more often; as
-        # rollouts improve the rollout pointwise score overtakes the pivot.
-        # Track rollout - pivot pointwise gap as the training-dynamics signal.
-        judge_win_rate = (dpo_rollout_pointwise_sum - dpo_pivot_pointwise_sum) / max(1, dpo_total_prefixes) + 0.5
+        judge_rollout_vs_original_pointwise_margin = (dpo_rollout_pointwise_sum - dpo_pivot_pointwise_sum) / max(
+            1, dpo_total_prefixes
+        )
         val_loss_selected = val_loss_raw
-    elif condition == "rfnll_original_vs_finephrase":
-        judge_win_rate = 1.0 - chosen_original
-    elif condition == "finephrase_math_ntp":
-        judge_win_rate = 1.0
     else:
-        judge_win_rate = 0.0
+        judge_rollout_vs_original_pointwise_margin = 0.0
     elapsed = max(1e-6, time.time() - start)
     tok_per_sec = tokens_seen / elapsed
 
@@ -691,9 +646,8 @@ def main() -> None:
         "primary_metric": val_loss_selected,
         "val_loss_raw": val_loss_raw,
         "val_loss_selected": val_loss_selected,
-        "judge_win_rate_vs_raw": judge_win_rate,
+        "judge_rollout_vs_original_pointwise_margin": judge_rollout_vs_original_pointwise_margin,
         "chosen_original_rate": chosen_original,
-        "chosen_finephrase_rate": chosen_finephrase,
         "chosen_rollout_rate": chosen_rollout,
         "repetition_4gram_rate": rep,
         "tokens_seen": tokens_seen,
@@ -706,14 +660,19 @@ def main() -> None:
         metrics["dpo_beta"] = dpo_beta
         metrics["num_rollouts_per_prefix"] = num_rollouts
         metrics["judge_mode"] = "full_pairwise"
-        metrics["pool_size"] = num_rollouts + 1
-        metrics["pairs_per_prefix"] = (num_rollouts + 1) * num_rollouts // 2
+        metrics["include_rewrite_candidate"] = include_rewrite_candidate
+        metrics["pool_size"] = num_rollouts + 1 + int(include_rewrite_candidate)
+        metrics["pairs_per_prefix"] = metrics["pool_size"] * (metrics["pool_size"] - 1) // 2
         metrics["dpo_kept_prefixes"] = dpo_kept_prefixes
         metrics["dpo_total_prefixes"] = dpo_total_prefixes
         metrics["chosen_is_pivot_rate"] = chosen_original
-        metrics["chosen_is_rollout_rate"] = chosen_rollout
+        metrics["chosen_is_rewrite_rate"] = dpo_chosen_is_rewrite / max(1, dpo_kept_prefixes)
+        metrics["chosen_is_rollout_rate"] = dpo_chosen_is_rollout / max(1, dpo_kept_prefixes)
         metrics["dpo_rejected_is_pivot_rate"] = dpo_rejected_is_pivot / max(1, dpo_kept_prefixes)
+        metrics["dpo_rejected_is_rewrite_rate"] = dpo_rejected_is_rewrite / max(1, dpo_kept_prefixes)
+        metrics["dpo_rejected_is_rollout_rate"] = dpo_rejected_is_rollout / max(1, dpo_kept_prefixes)
         metrics["pivot_pointwise_mean"] = dpo_pivot_pointwise_sum / max(1, dpo_total_prefixes)
+        metrics["rewrite_pointwise_mean"] = dpo_rewrite_pointwise_sum / max(1, dpo_rewrite_available)
         metrics["rollout_pointwise_mean"] = dpo_rollout_pointwise_sum / max(1, dpo_total_prefixes)
         metrics["pool_top_score_mean"] = dpo_pool_top_score_sum / max(1, dpo_total_prefixes)
         metrics["pool_bottom_score_mean"] = dpo_pool_bottom_score_sum / max(1, dpo_total_prefixes)

@@ -43,6 +43,20 @@ def latest_snapshot(repo_cache: str | Path) -> Path:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def resolve_hf_path(path: str | Path) -> Path:
+    """Resolve either a flat model dir or a Hugging Face cache repo dir.
+
+    Configs often point at `/hf/hub/models--Org--Name` so the same file can run
+    after `huggingface-cli download` refreshes the snapshot hash. If the path is
+    already a materialized model directory, return it unchanged.
+    """
+    path = Path(path)
+    snapshots = path / "snapshots"
+    if snapshots.exists():
+        return latest_snapshot(path)
+    return path
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     try:
@@ -67,6 +81,16 @@ def jsonl_iter(path: str | Path):
             line = line.strip()
             if line:
                 yield json.loads(line)
+
+
+def load_split_rows(path: str | Path, split: str, fallback_path: str | Path | None = None) -> list[dict[str, Any]]:
+    rows = [row for row in jsonl_iter(path) if row.get("split") == split]
+    if rows or not fallback_path:
+        return rows
+    fallback = Path(fallback_path)
+    if not fallback.exists():
+        return rows
+    return [row for row in jsonl_iter(fallback) if row.get("split") == split]
 
 
 def write_jsonl(path: str | Path, rows) -> int:
