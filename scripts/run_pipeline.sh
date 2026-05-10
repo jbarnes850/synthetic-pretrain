@@ -121,15 +121,20 @@ case "${STAGE}" in
     "${docker_base[@]}" bash -lc "python3 scripts/build_thinking_data.py \
       --config configs/thinking_sft_base.yaml \
       --input-jsonl data/processed/pretraining_examples.jsonl \
-      --output-jsonl data/processed/interleaved_thinking_full.jsonl \
-      --train-count 61440 --val-count 4096 \
-      --chunk-tokens 384 --max-augmented-tokens 768 \
+      --output-jsonl '${THINKING_OUTPUT_JSONL:-data/processed/interleaved_thinking_full.jsonl}' \
+      --train-count '${THINKING_TRAIN_COUNT:-30720}' --val-count '${THINKING_VAL_COUNT:-2048}' \
+      --chunk-tokens 384 --max-augmented-tokens '${THINKING_MAX_AUGMENTED_TOKENS:-6144}' \
       --teacher-endpoint '${TEACHER_ENDPOINT}' \
       --teacher-model '${TEACHER_MODEL}' \
       --teacher-temperature 0.6 --teacher-top-p 0.95 \
-      --teacher-max-tokens 1536 \
-      --candidate-multiplier '${THINKING_CANDIDATE_MULTIPLIER:-1.25}' \
-      --max-workers 16 --skip-invalid --resume"
+      --teacher-max-tokens '${THINKING_TEACHER_MAX_TOKENS:-8192}' \
+      --teacher-timeout '${THINKING_TEACHER_TIMEOUT:-900}' \
+      --candidate-multiplier '${THINKING_CANDIDATE_MULTIPLIER:-1.0}' \
+      --num-shards '${THINKING_NUM_SHARDS:-1}' \
+      --shard-index '${THINKING_SHARD_INDEX:-0}' \
+      --max-workers '${THINKING_MAX_WORKERS:-24}' \
+      --max-skip-rate '${THINKING_MAX_SKIP_RATE:-0.10}' \
+      --skip-invalid --resume"
     ;;
   split-thinking)
     "${docker_base[@]}" python3 scripts/split_midtraining_data.py \
@@ -137,7 +142,15 @@ case "${STAGE}" in
       --sft-jsonl data/processed/interleaved_thinking_sft.jsonl \
       --rl-jsonl data/processed/interleaved_thinking_rl.jsonl \
       --heldout-jsonl data/processed/interleaved_thinking_heldout.jsonl \
-      --sft-count 32768 --rl-count 28672 --heldout-count 4096
+      --sft-count 16384 --rl-count 14336 --heldout-count 2048
+    ;;
+  merge-thinking-shards)
+    "${docker_base[@]}" python3 scripts/merge_thinking_shards.py \
+      --input-jsonl ${THINKING_SHARD_INPUTS:-data/processed/interleaved_thinking_shard0.jsonl data/processed/interleaved_thinking_shard1.jsonl} \
+      --output-jsonl data/processed/interleaved_thinking_full.jsonl \
+      --expected-total 32768 --expected-train 30720 --expected-val 2048 \
+      --trim-to-expected \
+      --require-preserved
     ;;
   data-integrity-gate)
     "${docker_gpu[@]}" -lc "python3 scripts/eval_data_integrity_gate.py \
@@ -265,6 +278,7 @@ Stages:
   build-rewrites
   sip-cpt-rewrite
   build-thinking
+  merge-thinking-shards
   split-thinking
   data-integrity-gate
   sft-base

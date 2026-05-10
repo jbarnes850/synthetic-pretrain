@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import random
 import re
@@ -169,6 +170,250 @@ def prune_think_spans(text: str, max_thoughts: int) -> str:
     return re.sub(r"<think>.*?</think>", repl, text, flags=re.IGNORECASE | re.DOTALL)
 
 
+def extract_think_spans(text: str, max_thoughts: int) -> list[str]:
+    normalized = normalize_think_tags(text)
+    spans = re.findall(r"<think>.*?</think>", normalized, flags=re.IGNORECASE | re.DOTALL)
+    return [span.strip() for span in spans[:max_thoughts] if strip_think_tags(span)]
+
+
+def split_interleaved_text(text: str) -> tuple[list[str], list[str]]:
+    """Return raw-text segments and think spans in alternating order."""
+    normalized = normalize_think_tags(text)
+    text_segments: list[str] = []
+    spans: list[str] = []
+    cursor = 0
+    for match in re.finditer(r"<think>.*?</think>", normalized, flags=re.IGNORECASE | re.DOTALL):
+        text_segments.append(normalized[cursor : match.start()])
+        spans.append(match.group(0).strip())
+        cursor = match.end()
+    text_segments.append(normalized[cursor:])
+    return text_segments, spans
+
+
+def normalize_for_alignment(text: str) -> tuple[str, list[int]]:
+    """Collapse whitespace while keeping a map from normalized chars to original offsets."""
+    out: list[str] = []
+    norm_to_orig_end: list[int] = []
+    in_space = False
+    for idx, char in enumerate(unicodedata.normalize("NFKC", text)):
+        if char.isspace():
+            if not in_space:
+                out.append(" ")
+                norm_to_orig_end.append(idx + 1)
+                in_space = True
+            else:
+                norm_to_orig_end[-1] = idx + 1
+            continue
+        out.append(char)
+        norm_to_orig_end.append(idx + 1)
+        in_space = False
+    return "".join(out).strip(), norm_to_orig_end
+
+
+def normalized_prefix_len(text: str, boundary: int) -> int:
+    normalized, _ = normalize_for_alignment(text[:boundary])
+    return len(normalized)
+
+
+def line_around(text: str, pos: int) -> str:
+    start = text.rfind("\n", 0, max(0, pos)) + 1
+    end = text.find("\n", pos)
+    if end == -1:
+        end = len(text)
+    return text[start:end]
+
+
+def is_inside_fenced_block(text: str, pos: int) -> bool:
+    return len(re.findall(r"```", text[:pos])) % 2 == 1
+
+
+def looks_code_like_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith(("```", ">>>", "...", "$ ")):
+        return True
+    if line.startswith(("    ", "\t")):
+        return True
+    code_markers = ("<-", "=>", "==", "!=", "::", "{", "}", ";")
+    if any(marker in stripped for marker in code_markers):
+        return True
+    if re.search(r"\b(?:Error|Traceback|Exception)\b", stripped) and re.search(r"[()=,:]", stripped):
+        return True
+    if re.search(r"\b[A-Za-z_][A-Za-z0-9_.]*\s*=", stripped) and re.search(r"[(),]", stripped):
+        return True
+    if re.search(r"\b[A-Za-z_][A-Za-z0-9_.]*\s*\([^)]*", stripped) and re.search(r"[=,]", stripped):
+        return True
+    punctuation = sum(1 for char in stripped if char in "=()[]{}<>;:,")
+    return punctuation >= 6 and punctuation / max(1, len(stripped)) > 0.08
+
+
+def unsafe_code_boundary(text: str, pos: int) -> bool:
+    if pos in (0, len(text)):
+        return False
+    if is_inside_fenced_block(text, pos):
+        return True
+    current_line = line_around(text, max(0, pos - 1))
+    next_line = line_around(text, min(len(text), pos + 1))
+    return looks_code_like_line(current_line) or looks_code_like_line(next_line)
+
+
+def safe_insertion_positions(text: str) -> list[int]:
+    positions = {0, len(text)}
+    for match in re.finditer(r"\n{2,}", text):
+        if not unsafe_code_boundary(text, match.end()):
+            positions.add(match.end())
+    for match in re.finditer(r"\n", text):
+        if not unsafe_code_boundary(text, match.end()):
+            positions.add(match.end())
+    for match in re.finditer(r"[.!?;:][\"')\]]?\s+", text):
+        if not unsafe_code_boundary(text, match.end()):
+            positions.add(match.end())
+    for match in re.finditer(r"(?:^|\n)(?:#+\s.*|[-*•]\s.*)\n", text):
+        if not unsafe_code_boundary(text, match.end()):
+            positions.add(match.end())
+    return sorted(pos for pos in positions if 0 <= pos <= len(text))
+
+
+def snap_to_safe_boundary(text: str, target: int, minimum: int = 0, max_distance: int = 360) -> int | None:
+    target = max(0, min(len(text), target))
+    candidates = [pos for pos in safe_insertion_positions(text) if pos >= minimum]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda pos: (abs(pos - target), pos < target, pos))
+    if best not in (0, len(text)) and abs(best - target) > max_distance:
+        return None
+    return best
+
+
+def teacher_boundary_to_raw_boundary(raw_text: str, stripped_teacher: str, teacher_boundary: int) -> int | None:
+    raw_norm, raw_map = normalize_for_alignment(raw_text)
+    teacher_norm, _ = normalize_for_alignment(stripped_teacher)
+    if not raw_norm or not teacher_norm:
+        return None
+    norm_boundary = normalized_prefix_len(stripped_teacher, teacher_boundary)
+    matcher = difflib.SequenceMatcher(None, teacher_norm, raw_norm, autojunk=False)
+    blocks = matcher.get_matching_blocks()
+    for block in blocks:
+        if block.size and block.a <= norm_boundary <= block.a + block.size:
+            raw_norm_boundary = block.b + (norm_boundary - block.a)
+            break
+    else:
+        before = [block for block in blocks if block.size and block.a + block.size <= norm_boundary]
+        after = [block for block in blocks if block.size and block.a >= norm_boundary]
+        candidates: list[tuple[int, int]] = []
+        if before:
+            block = max(before, key=lambda b: b.a + b.size)
+            candidates.append((norm_boundary - (block.a + block.size), block.b + block.size))
+        if after:
+            block = min(after, key=lambda b: b.a)
+            candidates.append((block.a - norm_boundary, block.b))
+        if not candidates:
+            return None
+        raw_norm_boundary = min(candidates, key=lambda item: item[0])[1]
+    if raw_norm_boundary <= 0:
+        return 0
+    if raw_norm_boundary >= len(raw_map):
+        return len(raw_text)
+    return raw_map[raw_norm_boundary - 1]
+
+
+def teacher_insertion_boundaries(text: str) -> tuple[str, list[int], list[str]]:
+    text_segments, spans = split_interleaved_text(text)
+    stripped_parts: list[str] = []
+    boundaries: list[int] = []
+    cursor = 0
+    for index, span in enumerate(spans):
+        segment = text_segments[index] if index < len(text_segments) else ""
+        stripped_parts.append(segment)
+        cursor += len(segment)
+        boundaries.append(cursor)
+    stripped_parts.extend(text_segments[len(spans) :])
+    return "".join(stripped_parts), boundaries, spans
+
+
+def has_unsafe_thought_boundaries(raw_text: str, augmented_text: str) -> bool:
+    stripped_text, boundaries, spans = teacher_insertion_boundaries(augmented_text)
+    if not spans:
+        return True
+    if canonical_original_text(raw_text) != canonical_original_text(stripped_text):
+        return True
+    min_gap = 80
+    interior = [boundary for boundary in boundaries if 0 < boundary < len(stripped_text)]
+    min_interior = max(1, min(3, len(spans) // 2))
+    if len(interior) < min_interior:
+        return True
+    if boundaries.count(0) > 1:
+        return True
+    ordered = sorted(boundaries)
+    if any(right - left < min_gap for left, right in zip(ordered, ordered[1:]) if left != right):
+        return True
+    if len(set(boundaries)) != len(boundaries):
+        return True
+    safe_positions = set(safe_insertion_positions(stripped_text))
+    return any(boundary not in safe_positions for boundary in boundaries)
+
+
+def alignment_repair_interleaving(raw_text: str, augmented_text: str, max_thoughts: int) -> tuple[str, str] | None:
+    stripped_teacher, teacher_boundaries, spans = teacher_insertion_boundaries(augmented_text)
+    spans = [span for span in spans[:max_thoughts] if strip_think_tags(span)]
+    if not spans:
+        return None
+    positions: list[int] = []
+    minimum = 0
+    min_gap = 80
+    for index, span in enumerate(spans):
+        teacher_boundary = teacher_boundaries[min(index, len(teacher_boundaries) - 1)] if teacher_boundaries else 0
+        raw_boundary = teacher_boundary_to_raw_boundary(raw_text, stripped_teacher, teacher_boundary)
+        if raw_boundary is None:
+            return None
+        snapped = snap_to_safe_boundary(raw_text, raw_boundary, minimum=minimum)
+        if snapped is None:
+            return None
+        positions.append(snapped)
+        minimum = snapped + min_gap
+    return interleave_at_positions(raw_text, spans, positions), "alignment_safe_boundary"
+
+
+def fallback_safe_boundary_repair(raw_text: str, spans: list[str]) -> tuple[str, str] | None:
+    safe_positions = safe_insertion_positions(raw_text)
+    if not spans or len(safe_positions) < len(spans):
+        return None
+    positions = [0]
+    usable = [pos for pos in safe_positions if pos not in (0, len(raw_text))]
+    min_gap = 80
+    for i in range(1, len(spans)):
+        if not usable:
+            return None
+        target = round(len(raw_text) * i / len(spans))
+        later = [pos for pos in usable if pos >= positions[-1] + min_gap]
+        if not later:
+            return None
+        best = min(later, key=lambda pos: (abs(pos - target), pos))
+        positions.append(best)
+        usable = [pos for pos in usable if pos >= best + min_gap]
+    return interleave_at_positions(raw_text, spans, positions), "fallback_safe_boundary"
+
+
+def interleave_at_positions(raw_text: str, spans: list[str], positions: list[int]) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for pos, span in zip(positions, spans, strict=True):
+        pos = max(cursor, min(len(raw_text), pos))
+        parts.append(raw_text[cursor:pos])
+        parts.append(f"\n\n{span}\n\n")
+        cursor = pos
+    parts.append(raw_text[cursor:])
+    return "".join(parts).strip()
+
+
+def interleave_preserved_text(raw_text: str, spans: list[str]) -> str:
+    repaired = fallback_safe_boundary_repair(raw_text, spans)
+    if repaired is None:
+        return raw_text
+    return repaired[0]
+
+
 def word_set(text: str) -> set[str]:
     return {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9'’-]{2,}", text)}
 
@@ -238,24 +483,51 @@ def call_teacher(
 
 
 def choose_rows(
-    rows: list[dict[str, Any]],
+    input_jsonl: str | Path,
     train_count: int,
     val_count: int,
     seed: int,
     candidate_multiplier: float,
+    num_shards: int,
+    shard_index: int,
 ) -> list[dict[str, Any]]:
+    if num_shards < 1:
+        raise ValueError("--num-shards must be >= 1")
+    if shard_index < 0 or shard_index >= num_shards:
+        raise ValueError(f"--shard-index must be in [0, {num_shards}), got {shard_index}")
     rng = random.Random(seed)
-    train = [row for row in rows if row.get("split") == "train"]
-    val = [row for row in rows if row.get("split") == "val"]
+    train_candidates = max(train_count, int(train_count * candidate_multiplier))
+    val_candidates = max(val_count, int(val_count * candidate_multiplier))
+    reservoirs = {"train": [], "val": []}
+    targets = {"train": train_candidates, "val": val_candidates}
+    seen = {"train": 0, "val": 0}
+    for row in jsonl_iter(input_jsonl):
+        split = row.get("split")
+        if split not in reservoirs:
+            continue
+        seen[split] += 1
+        target = targets[split]
+        if target <= 0:
+            continue
+        reservoir = reservoirs[split]
+        if len(reservoir) < target:
+            reservoir.append(row)
+            continue
+        replacement_idx = rng.randrange(seen[split])
+        if replacement_idx < target:
+            reservoir[replacement_idx] = row
+    train = reservoirs["train"]
+    val = reservoirs["val"]
     rng.shuffle(train)
     rng.shuffle(val)
     if len(train) < train_count or len(val) < val_count:
         raise RuntimeError(
-            f"Not enough rows: requested {train_count=} {val_count=}, got train={len(train)} val={len(val)}"
+            f"Not enough rows: requested {train_count=} {val_count=}, got train={seen['train']} val={seen['val']}"
         )
-    train_candidates = max(train_count, int(train_count * candidate_multiplier))
-    val_candidates = max(val_count, int(val_count * candidate_multiplier))
-    return train[:train_candidates] + val[:val_candidates]
+    if num_shards > 1:
+        train = train[shard_index::num_shards]
+        val = val[shard_index::num_shards]
+    return train + val
 
 
 def append_jsonl(path: str | Path, row: dict[str, Any]) -> None:
@@ -287,10 +559,15 @@ def main() -> None:
     parser.add_argument("--teacher-temperature", type=float, default=0.6)
     parser.add_argument("--teacher-top-p", type=float, default=0.95)
     parser.add_argument("--teacher-max-tokens", type=int, default=1536)
+    parser.add_argument("--teacher-timeout", type=float, default=600.0)
     parser.add_argument("--teacher-retries", type=int, default=2)
     parser.add_argument("--max-workers", type=int, default=8)
     parser.add_argument("--candidate-multiplier", type=float, default=1.0)
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--skip-invalid", action="store_true")
+    parser.add_argument("--skip-teacher-errors", action="store_true")
+    parser.add_argument("--max-skip-rate", type=float, default=0.10)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--checkpoint-every", type=int, default=25)
     args = parser.parse_args()
@@ -304,11 +581,13 @@ def main() -> None:
         trust_remote_code=True,
     )
     rows = choose_rows(
-        list(jsonl_iter(args.input_jsonl)),
+        args.input_jsonl,
         args.train_count,
         args.val_count,
         args.seed,
         args.candidate_multiplier,
+        args.num_shards,
+        args.shard_index,
     )
 
     def prepare_item(idx_row: tuple[int, dict[str, Any]]) -> dict[str, Any]:
@@ -325,10 +604,37 @@ def main() -> None:
         raw_text = item["raw_text"]
         augmented_text = prune_think_spans(normalize_think_tags(raw_augmented), args.max_thoughts)
         validation = validate_augmented(raw_text, augmented_text, args.min_thoughts, args.max_thoughts)
+        unsafe_boundaries = has_unsafe_thought_boundaries(raw_text, augmented_text)
+        repaired_preservation = False
+        repaired_placement = False
+        repair_strategy = "none"
+        if validation["errors"] or unsafe_boundaries:
+            spans = extract_think_spans(raw_augmented, args.max_thoughts)
+            for span_count in range(min(len(spans), args.max_thoughts), args.min_thoughts - 1, -1):
+                repair_attempt = alignment_repair_interleaving(raw_text, raw_augmented, span_count)
+                if repair_attempt is None:
+                    repair_attempt = fallback_safe_boundary_repair(raw_text, spans[:span_count])
+                if repair_attempt is None:
+                    continue
+                repaired, repair_strategy = repair_attempt
+                repaired_validation = validate_augmented(raw_text, repaired, args.min_thoughts, args.max_thoughts)
+                repaired_unsafe_boundaries = has_unsafe_thought_boundaries(raw_text, repaired)
+                if not repaired_validation["errors"] and not repaired_unsafe_boundaries:
+                    augmented_text = repaired
+                    validation = repaired_validation
+                    repaired_preservation = True
+                    repaired_placement = unsafe_boundaries
+                    unsafe_boundaries = False
+                    break
         augmented_ids = tokenizer.encode(augmented_text, add_special_tokens=False)[: args.max_augmented_tokens]
         decoded_augmented = tokenizer.decode(augmented_ids, skip_special_tokens=False)
         decoded_validation = validate_augmented(raw_text, decoded_augmented, args.min_thoughts, args.max_thoughts)
+        decoded_unsafe_boundaries = has_unsafe_thought_boundaries(raw_text, decoded_augmented)
         errors = validation["errors"] + [f"decoded_{err}" for err in decoded_validation["errors"]]
+        if unsafe_boundaries:
+            errors.append("unsafe_thought_boundary")
+        if decoded_unsafe_boundaries:
+            errors.append("decoded_unsafe_thought_boundary")
         if errors or len(augmented_ids) < 32:
             preview = raw_augmented[:600].replace("\n", " ")
             raise RuntimeError(f"invalid augmentation for row={idx} id={row['id']}: {errors} preview={preview!r}")
@@ -348,6 +654,9 @@ def main() -> None:
             "think_count": decoded_validation["think_count"],
             "raw_word_coverage": decoded_validation["raw_word_coverage"],
             "original_text_preserved": decoded_validation["original_text_preserved"],
+            "preservation_repaired": repaired_preservation,
+            "placement_repaired": repaired_placement,
+            "repair_strategy": repair_strategy,
         }
 
     def build_one(idx_row: tuple[int, dict[str, Any]]) -> dict[str, Any]:
@@ -363,8 +672,8 @@ def main() -> None:
                 temperature=args.teacher_temperature,
                 top_p=args.teacher_top_p,
                 max_tokens=args.teacher_max_tokens,
-                timeout=120.0,
-                retries=0,
+                timeout=args.teacher_timeout,
+                retries=args.teacher_retries,
             )
             try:
                 return finish_item(item, raw_augmented)
@@ -422,6 +731,8 @@ def main() -> None:
             try:
                 row = fut.result()
             except RuntimeError as exc:
+                if str(exc).startswith("teacher call failed") and not args.skip_teacher_errors:
+                    raise
                 if not args.skip_invalid:
                     raise
                 skipped_invalid += 1
@@ -452,6 +763,13 @@ def main() -> None:
 
     final_rows = list(existing.values()) + out if existing else out
     n = write_jsonl(args.output_jsonl, final_rows) if existing else len(final_rows)
+    seen_this_run = len(out) + skipped_invalid
+    skip_rate = skipped_invalid / max(1, seen_this_run)
+    if skip_rate > args.max_skip_rate:
+        raise RuntimeError(
+            f"thinking data skip rate too high: {skipped_invalid}/{seen_this_run}={skip_rate:.3f} "
+            f"> max_skip_rate={args.max_skip_rate:.3f}"
+        )
     meta = {
         "output_jsonl": args.output_jsonl,
         "rows": n,
@@ -463,11 +781,24 @@ def main() -> None:
         "teacher_model": args.teacher_model,
         "teacher_backend": "http",
         "prompt_kind": "interleaved_thinking",
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
         "avg_think_count": sum(row["think_count"] for row in final_rows) / max(1, len(final_rows)),
         "avg_raw_word_coverage": sum(row["raw_word_coverage"] for row in final_rows) / max(1, len(final_rows)),
         "original_text_preserved_rate": sum(float(row["original_text_preserved"]) for row in final_rows)
         / max(1, len(final_rows)),
+        "preservation_repaired_rate": sum(float(row.get("preservation_repaired", False)) for row in final_rows)
+        / max(1, len(final_rows)),
+        "placement_repaired_rate": sum(float(row.get("placement_repaired", False)) for row in final_rows)
+        / max(1, len(final_rows)),
+        "repair_strategy_counts": {
+            strategy: sum(1 for row in final_rows if row.get("repair_strategy") == strategy)
+            for strategy in sorted({row.get("repair_strategy", "none") for row in final_rows})
+        },
         "skipped_invalid": skipped_invalid,
+        "skip_rate": skip_rate,
+        "teacher_timeout": args.teacher_timeout,
+        "max_skip_rate": args.max_skip_rate,
         "status": "complete",
     }
     write_meta(args.output_jsonl, meta)
