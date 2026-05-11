@@ -48,6 +48,9 @@ This adapts the Autodata acceptance loop: generate candidate data, evaluate it
 with a judge, and accept the data recipe only when it creates a useful gap over
 controls. Here, the controls are blank or generic thoughts, and the proposed
 data signal is an inserted thought conditioned on the same prefix.
+Corpus-style issues such as assistant-role leakage are checked by a separate
+corpus-quality gate before this stage; do not penalize thought style unless it
+affects the predicted continuation.
 
 ## Your Goal
 Decide whether the model continuation is semantically useful for predicting the
