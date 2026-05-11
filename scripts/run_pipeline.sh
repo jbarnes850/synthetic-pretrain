@@ -18,15 +18,39 @@ MODEL_ENDPOINT="${MODEL_ENDPOINT:-http://127.0.0.1:30001}"
 MODEL_NAME="${MODEL_NAME:-policy}"
 ARM="${ARM:-think_self_improved_rlmt}"
 DATA_GATE_SUMMARY="${DATA_GATE_SUMMARY:-outputs/data_integrity_gate/${RUN_ID}/summary.json}"
+CORPUS_QUALITY_SUMMARY="${CORPUS_QUALITY_SUMMARY:-outputs/corpus_quality_gate/${RUN_ID}/summary.json}"
 
 cd "${PROJECT_DIR}"
 mkdir -p logs data/processed outputs
+
+require_corpus_quality_gate() {
+  if [[ "${ALLOW_UNGATED_TRAINING:-0}" == "1" ]]; then
+    echo "warning: ALLOW_UNGATED_TRAINING=1; bypassing corpus quality gate" >&2
+    return 0
+  fi
+  python3 - "${CORPUS_QUALITY_SUMMARY}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(f"Corpus quality gate has not passed: missing {path}")
+summary = json.loads(path.read_text())
+status = summary.get("status")
+passed = summary.get("go_no_go", {}).get("passed")
+if status != "pass" or passed is not True:
+    raise SystemExit(f"Corpus quality gate has not passed: status={status!r} passed={passed!r} path={path}")
+print(f"corpus_quality_gate_ok: {path}")
+PY
+}
 
 require_data_integrity_gate() {
   if [[ "${ALLOW_UNGATED_TRAINING:-0}" == "1" ]]; then
     echo "warning: ALLOW_UNGATED_TRAINING=1; bypassing data integrity gate" >&2
     return 0
   fi
+  require_corpus_quality_gate
   python3 - "${DATA_GATE_SUMMARY}" <<'PY'
 import json
 import sys
@@ -153,7 +177,18 @@ case "${STAGE}" in
       --trim-to-expected \
       --require-preserved
     ;;
+  corpus-quality-gate)
+    "${docker_base[@]}" python3 scripts/eval_corpus_quality_gate.py \
+      --input-jsonl data/processed/interleaved_thinking_full.jsonl \
+      --critic-endpoint "${JUDGE_ENDPOINT}" --critic-model "${JUDGE_MODEL}" \
+      --flagged-critic-rows "${CORPUS_QA_FLAGGED_ROWS:-256}" \
+      --random-critic-rows "${CORPUS_QA_RANDOM_ROWS:-64}" \
+      --critic-max-workers "${CORPUS_QA_MAX_WORKERS:-16}" \
+      --output-dir "outputs/corpus_quality_gate/${RUN_ID}" \
+      2>&1 | tee "logs/${RUN_ID}-corpus-quality-gate.log"
+    ;;
   data-integrity-gate)
+    require_corpus_quality_gate
     "${docker_gpu[@]}" -lc "python3 scripts/eval_data_integrity_gate.py \
       --config configs/thinking_sft_base.yaml \
       --input-jsonl data/processed/interleaved_thinking_heldout.jsonl \
@@ -281,6 +316,7 @@ Stages:
   build-thinking
   merge-thinking-shards
   split-thinking
+  corpus-quality-gate
   data-integrity-gate
   sft-base
   sft-cpt

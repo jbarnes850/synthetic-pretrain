@@ -66,6 +66,7 @@ scripts/
   build_rewrite_data.py             Teacher rewrite pool builder for ablation
   build_thinking_data.py            Teacher augmentation for interleaved thoughts
   split_midtraining_data.py         Disjoint SFT/RL/heldout split builder
+  eval_corpus_quality_gate.py       Role/prompt-leak corpus QA gate
   eval_data_integrity_gate.py       Held-out thought-control data gate
   train.py                          NTP, SFT, and Online DPO trainer
   train_rlmt.py                     RLMT loop with reward-variance stop rules
@@ -99,6 +100,7 @@ scripts/run_pipeline.sh build-rewrites
 scripts/run_pipeline.sh sip-cpt-rewrite
 scripts/run_pipeline.sh build-thinking
 scripts/run_pipeline.sh split-thinking
+scripts/run_pipeline.sh corpus-quality-gate
 scripts/run_pipeline.sh data-integrity-gate
 scripts/run_pipeline.sh sft-base
 scripts/run_pipeline.sh sft-cpt
@@ -115,11 +117,12 @@ scripts/run_pipeline.sh selector-ablation
 scripts/run_pipeline.sh reasoning-eval
 ```
 
-Do not skip the data integrity gate. It must pass before training: matched
-teacher thoughts should improve held-out suffix reward over blank/generic
-thought controls. Do not skip the reward gate either; RLMT should stop before
-expensive training if more than half of evaluated prefix groups have near-zero
-reward variance.
+Do not skip the corpus quality or data integrity gates. Corpus QA checks that
+inserted thoughts are clean SFT targets without assistant-role or prompt-leak
+artifacts; data integrity checks that matched teacher thoughts improve held-out
+suffix reward over blank/generic controls. Do not skip the reward gate either;
+RLMT should stop before expensive training if more than half of evaluated prefix
+groups have near-zero reward variance.
 
 ## Claim Boundary
 
