@@ -129,12 +129,13 @@ case "${STAGE}" in
       --teacher-temperature 0.6 --teacher-top-p 0.95 \
       --teacher-max-tokens '${THINKING_TEACHER_MAX_TOKENS:-8192}' \
       --teacher-timeout '${THINKING_TEACHER_TIMEOUT:-900}' \
+      --progress-timeout '${THINKING_PROGRESS_TIMEOUT:-1800}' \
       --candidate-multiplier '${THINKING_CANDIDATE_MULTIPLIER:-1.0}' \
       --num-shards '${THINKING_NUM_SHARDS:-1}' \
       --shard-index '${THINKING_SHARD_INDEX:-0}' \
       --max-workers '${THINKING_MAX_WORKERS:-24}' \
       --max-skip-rate '${THINKING_MAX_SKIP_RATE:-0.10}' \
-      --skip-invalid --resume"
+      --skip-invalid --skip-teacher-errors --resume"
     ;;
   split-thinking)
     "${docker_base[@]}" python3 scripts/split_midtraining_data.py \

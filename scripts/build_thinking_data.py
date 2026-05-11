@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import random
 import re
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -471,7 +472,13 @@ def call_teacher(
     last_err: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            resp = requests.post(url, json=payload, timeout=timeout)
+            request_timeout = (min(30.0, timeout), timeout)
+            resp = requests.post(
+                url,
+                json=payload,
+                timeout=request_timeout,
+                headers={"Connection": "close"},
+            )
             resp.raise_for_status()
             message = resp.json()["choices"][0]["message"]
             return parse_augmented_text(message.get("content"))
@@ -570,6 +577,7 @@ def main() -> None:
     parser.add_argument("--max-skip-rate", type=float, default=0.10)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--checkpoint-every", type=int, default=25)
+    parser.add_argument("--progress-timeout", type=float, default=1800.0)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -726,40 +734,80 @@ def main() -> None:
     started_at = time.time()
     with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
         futures = {ex.submit(build_one, item): item for item in enumerate(rows)}
-        for done, fut in enumerate(as_completed(futures), start=1):
-            idx, src_row = futures[fut]
-            try:
-                row = fut.result()
-            except RuntimeError as exc:
-                if str(exc).startswith("teacher call failed") and not args.skip_teacher_errors:
-                    raise
-                if not args.skip_invalid:
-                    raise
-                skipped_invalid += 1
-                record_skipped(src_row, str(exc))
-                print(
-                    json.dumps({"skipped_invalid_row": src_row.get("id"), "split": src_row.get("split"), "error": str(exc)[:500]}),
-                    flush=True,
-                )
-                continue
-            out.append(row)
-            append_jsonl(output_path, row)
-            if done % args.checkpoint_every == 0 or done == len(futures):
+        done_count = 0
+        last_progress_at = time.time()
+        while futures:
+            done_futures, _ = wait(futures, timeout=args.progress_timeout, return_when=FIRST_COMPLETED)
+            if not done_futures:
                 elapsed = max(1e-9, time.time() - started_at)
-                rate = done / elapsed
                 progress = {
                     "output_jsonl": args.output_jsonl,
-                    "status": "running",
+                    "status": "stalled",
                     "built_this_run": len(out),
-                    "seen_this_run": done,
-                    "remaining_this_run": len(futures) - done,
+                    "seen_this_run": done_count,
+                    "remaining_this_run": len(futures),
                     "resume_existing": len(existing),
                     "skipped_invalid": skipped_invalid,
-                    "rows_per_hour": rate * 3600,
-                    "eta_hours_remaining": (len(futures) - done) / max(1e-9, rate) / 3600,
+                    "rows_per_hour": done_count / elapsed * 3600,
+                    "eta_hours_remaining": len(futures) / max(1e-9, done_count / elapsed) / 3600,
+                    "last_progress_unix": last_progress_at,
+                    "progress_timeout": args.progress_timeout,
                 }
                 write_meta(output_path, progress)
-                print(json.dumps(progress), flush=True)
+                print(
+                    json.dumps(
+                        {
+                            "error": "no_progress_timeout",
+                            "progress_timeout": args.progress_timeout,
+                            "message": "aborting immediately so the launcher can restart from the JSONL checkpoint",
+                        }
+                    ),
+                    flush=True,
+                )
+                os._exit(124)
+            for fut in done_futures:
+                done_count += 1
+                last_progress_at = time.time()
+                idx, src_row = futures.pop(fut)
+                try:
+                    row = fut.result()
+                except RuntimeError as exc:
+                    if str(exc).startswith("teacher call failed") and not args.skip_teacher_errors:
+                        raise
+                    if not args.skip_invalid:
+                        raise
+                    skipped_invalid += 1
+                    record_skipped(src_row, str(exc))
+                    print(
+                        json.dumps(
+                            {
+                                "skipped_invalid_row": src_row.get("id"),
+                                "split": src_row.get("split"),
+                                "error": str(exc)[:500],
+                            }
+                        ),
+                        flush=True,
+                    )
+                    continue
+                out.append(row)
+                append_jsonl(output_path, row)
+                if done_count % args.checkpoint_every == 0 or not futures:
+                    elapsed = max(1e-9, time.time() - started_at)
+                    rate = done_count / elapsed
+                    progress = {
+                        "output_jsonl": args.output_jsonl,
+                        "status": "running",
+                        "built_this_run": len(out),
+                        "seen_this_run": done_count,
+                        "remaining_this_run": len(futures),
+                        "resume_existing": len(existing),
+                        "skipped_invalid": skipped_invalid,
+                        "rows_per_hour": rate * 3600,
+                        "eta_hours_remaining": len(futures) / max(1e-9, rate) / 3600,
+                        "last_progress_unix": last_progress_at,
+                    }
+                    write_meta(output_path, progress)
+                    print(json.dumps(progress), flush=True)
 
     final_rows = list(existing.values()) + out if existing else out
     n = write_jsonl(args.output_jsonl, final_rows) if existing else len(final_rows)
