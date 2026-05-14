@@ -13,8 +13,9 @@ import os
 import random
 import re
 import statistics
+import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Any
 
@@ -209,10 +210,32 @@ def generate_samples(
     temperature: float,
     top_p: float,
     device: torch.device,
+    progress_label: str = "",
+    progress_every_batches: int = 10,
 ) -> list[list[list[int]]]:
     flat_prompts = [prompt for prompt in prompts for _ in range(samples_per_prompt)]
     flat_outputs: list[list[int]] = []
-    for start in range(0, len(flat_prompts), batch_size):
+    total_batches = (len(flat_prompts) + batch_size - 1) // batch_size
+    label = progress_label or "generate_samples"
+    if total_batches:
+        print(
+            json.dumps(
+                {
+                    "stage": label,
+                    "event": "start",
+                    "prompts": len(prompts),
+                    "flat_prompts": len(flat_prompts),
+                    "samples_per_prompt": samples_per_prompt,
+                    "batch_size": batch_size,
+                    "total_batches": total_batches,
+                    "max_new_tokens": max_new_tokens,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    start_time = time.time()
+    for batch_index, start in enumerate(range(0, len(flat_prompts), batch_size), start=1):
         batch = flat_prompts[start : start + batch_size]
         input_ids, attn, max_len = pad_left(tokenizer, batch, device)
         out = model.generate(
@@ -226,6 +249,30 @@ def generate_samples(
         )
         for seq in out.tolist():
             flat_outputs.append(seq[max_len:])
+        if progress_every_batches > 0 and (
+            batch_index == 1 or batch_index % progress_every_batches == 0 or batch_index == total_batches
+        ):
+            elapsed = max(1e-6, time.time() - start_time)
+            done = min(start + len(batch), len(flat_prompts))
+            rate = done / elapsed
+            remaining = max(0, len(flat_prompts) - done)
+            eta = remaining / rate if rate > 0 else None
+            print(
+                json.dumps(
+                    {
+                        "stage": label,
+                        "event": "progress",
+                        "batch": batch_index,
+                        "total_batches": total_batches,
+                        "done": done,
+                        "total": len(flat_prompts),
+                        "rate_samples_per_min": rate * 60.0,
+                        "eta_minutes": eta / 60.0 if eta is not None else None,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
     return [flat_outputs[idx : idx + samples_per_prompt] for idx in range(0, len(flat_outputs), samples_per_prompt)]
 
 
@@ -320,9 +367,23 @@ def build_student_thoughts(
     temperature: float,
     top_p: float,
     device: torch.device,
+    progress_label: str = "student_generated_thought",
+    progress_every_batches: int = 10,
 ) -> list[list[dict[str, Any]]]:
     prompts = [encode(tokenizer, row["prompt_text"]) for row in eval_rows]
-    grouped = generate_samples(model, tokenizer, prompts, samples_per_prefix, max_new_tokens, batch_size, temperature, top_p, device)
+    grouped = generate_samples(
+        model,
+        tokenizer,
+        prompts,
+        samples_per_prefix,
+        max_new_tokens,
+        batch_size,
+        temperature,
+        top_p,
+        device,
+        progress_label=f"{progress_label}:thought_generation",
+        progress_every_batches=progress_every_batches,
+    )
     out = []
     for prefix_index, group in enumerate(grouped):
         thought_group = []
@@ -372,6 +433,8 @@ def judge_one(
     max_tokens: int,
     timeout: float,
     retries: int,
+    response_format_json: bool,
+    enable_thinking: bool,
 ) -> dict[str, Any]:
     payload = {
         "model": model_name,
@@ -379,20 +442,33 @@ def judge_one(
         "temperature": temperature,
         "top_p": top_p,
         "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": enable_thinking},
     }
+    if response_format_json:
+        payload["response_format"] = {"type": "json_object"}
     url = endpoint.rstrip("/") + "/v1/chat/completions"
     last_err: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            resp = requests.post(url, json=payload, timeout=timeout)
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
+            with requests.post(url, json=payload, timeout=timeout) as resp:
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
             parsed = parse_judge_response(content)
             parsed["raw_judge"] = content
             return parsed
         except Exception as exc:
             last_err = exc
     return {"score": None, "failure_mode": "judge_error", "reason": str(last_err), "raw_judge": f"ERROR: {last_err}"}
+
+
+def collapse_judgments(judgments: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_scores = [j["score"] for j in judgments if j.get("score") in {0, 1}]
+    return {
+        "score": safe_mean([float(score) for score in valid_scores]) if valid_scores else None,
+        "valid_judge_repeats": len(valid_scores),
+        "invalid_judge_repeats": len(judgments) - len(valid_scores),
+        "judge_repeats": judgments,
+    }
 
 
 def judge_repeated(
@@ -405,27 +481,82 @@ def judge_repeated(
     max_workers: int,
     repeats: int,
     retries: int,
+    response_format_json: bool = True,
+    enable_thinking: bool = False,
+    progress_label: str = "judge_repeated",
+    progress_every: int = 256,
 ) -> list[dict[str, Any]]:
     repeated = [(idx, prompt) for idx, prompt in enumerate(prompts) for _ in range(repeats)]
     grouped: list[list[dict[str, Any]]] = [[] for _ in prompts]
+    total = len(repeated)
+    print(
+        json.dumps(
+            {
+                "stage": progress_label,
+                "event": "start",
+                "prompts": len(prompts),
+                "repeats": repeats,
+                "total_judge_calls": total,
+                "max_workers": max_workers,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    start_time = time.time()
+    completed = 0
+    valid = 0
+    invalid = 0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
-            ex.submit(judge_one, prompt, endpoint, model_name, temperature, top_p, max_tokens, 60.0, retries): idx
+            ex.submit(
+                judge_one,
+                prompt,
+                endpoint,
+                model_name,
+                temperature,
+                top_p,
+                max_tokens,
+                60.0,
+                retries,
+                response_format_json,
+                enable_thinking,
+            ): idx
             for idx, prompt in repeated
         }
         for fut in as_completed(futures):
-            grouped[futures[fut]].append(fut.result())
+            result = fut.result()
+            grouped[futures[fut]].append(result)
+            completed += 1
+            if result.get("score") in {0, 1}:
+                valid += 1
+            else:
+                invalid += 1
+            if progress_every > 0 and (completed == 1 or completed % progress_every == 0 or completed == total):
+                elapsed = max(1e-6, time.time() - start_time)
+                rate = completed / elapsed
+                remaining = max(0, total - completed)
+                eta = remaining / rate if rate > 0 else None
+                print(
+                    json.dumps(
+                        {
+                            "stage": progress_label,
+                            "event": "progress",
+                            "done": completed,
+                            "total": total,
+                            "valid": valid,
+                            "invalid": invalid,
+                            "invalid_rate": invalid / max(1, completed),
+                            "rate_calls_per_min": rate * 60.0,
+                            "eta_minutes": eta / 60.0 if eta is not None else None,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
     out = []
     for judgments in grouped:
-        valid_scores = [j["score"] for j in judgments if j.get("score") in {0, 1}]
-        out.append(
-            {
-                "score": safe_mean([float(score) for score in valid_scores]) if valid_scores else None,
-                "valid_judge_repeats": len(valid_scores),
-                "invalid_judge_repeats": len(judgments) - len(valid_scores),
-                "judge_repeats": judgments,
-            }
-        )
+        out.append(collapse_judgments(judgments))
     return out
 
 
@@ -438,15 +569,18 @@ def evaluate_condition(
     args,
     judge_cfg: dict[str, Any],
     device: torch.device,
+    records_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     suffix_prompts: list[list[int]] = []
     prompt_records: list[dict[str, Any]] = []
     for prefix_index, (row, thoughts) in enumerate(zip(eval_rows, condition_thoughts)):
         for sample_index, thought in enumerate(thoughts):
+            record_index = len(prompt_records)
             suffix_prompt = row["prompt_text"] + thought["thought_text"].strip() + "</think>"
             suffix_prompts.append(encode(tokenizer, suffix_prompt))
             prompt_records.append(
                 {
+                    "record_index": record_index,
                     "condition": condition,
                     "prefix_index": prefix_index,
                     "sample_index": sample_index,
@@ -460,42 +594,202 @@ def evaluate_condition(
                 }
             )
 
-    grouped_suffixes = generate_samples(
-        model,
-        tokenizer,
-        suffix_prompts,
-        1,
-        args.suffix_tokens,
-        args.gen_batch_size,
-        args.temperature,
-        args.top_p,
-        device,
-    )
-    records: list[dict[str, Any]] = []
-    judge_prompts: list[str] = []
-    for record, suffix_group in zip(prompt_records, grouped_suffixes):
-        predicted_suffix = decode(tokenizer, suffix_group[0]).strip()
-        judge_prompts.append(
-            JUDGE_PROMPT.format(
-                prefix=record["prefix_text"][: args.max_judge_chars],
-                thought=record["thought_text"][: args.max_judge_chars],
-                reference=record["reference_text"][: args.max_judge_chars],
-                candidate=predicted_suffix[: args.max_judge_chars],
-            )
-        )
-        records.append(
+    total_records = len(prompt_records)
+    total_batches = (total_records + args.gen_batch_size - 1) // args.gen_batch_size
+    print(
+        json.dumps(
             {
-                **record,
-                "predicted_suffix": predicted_suffix,
-                "predicted_suffix_words": word_count(predicted_suffix),
-                "suffix_tokens": len(suffix_group[0]),
-            }
-        )
+                "stage": f"{condition}:pipeline",
+                "event": "start",
+                "records": total_records,
+                "generation_batches": total_batches,
+                "gen_batch_size": args.gen_batch_size,
+                "judge_repeats": args.judge_repeats,
+                "judge_max_workers": args.judge_max_workers,
+                "max_pending_judge_records": args.max_pending_judge_records,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
-    judgments = judge_repeated(judge_prompts, **judge_cfg)
-    for record, judgment in zip(records, judgments):
-        record.update(judgment)
-    return records
+    completed_records: dict[int, dict[str, Any]] = {}
+    records_by_index: dict[int, dict[str, Any]] = {}
+    pending_judgments: dict[int, list[dict[str, Any]]] = {}
+    future_to_index: dict[Any, int] = {}
+    judge_calls_done = 0
+    judge_valid = 0
+    judge_invalid = 0
+    streamed = 0
+    start_time = time.time()
+    out_f = records_path.open("w", encoding="utf-8") if records_path is not None else None
+
+    def stream_record(record: dict[str, Any]) -> None:
+        nonlocal streamed
+        streamed += 1
+        if out_f is not None:
+            out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            out_f.flush()
+        if streamed == 1 or streamed % args.record_progress_every == 0 or streamed == total_records:
+            elapsed = max(1e-6, time.time() - start_time)
+            rate = streamed / elapsed
+            remaining = max(0, total_records - streamed)
+            eta = remaining / rate if rate > 0 else None
+            print(
+                json.dumps(
+                    {
+                        "stage": f"{condition}:pipeline",
+                        "event": "records_streamed",
+                        "streamed": streamed,
+                        "total": total_records,
+                        "pending_judge_records": len(pending_judgments),
+                        "judge_calls_done": judge_calls_done,
+                        "judge_valid": judge_valid,
+                        "judge_invalid": judge_invalid,
+                        "rate_records_per_min": rate * 60.0,
+                        "eta_minutes": eta / 60.0 if eta is not None else None,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+
+    def drain_judges(block: bool) -> None:
+        nonlocal judge_calls_done, judge_valid, judge_invalid
+        while future_to_index:
+            done, _ = wait(
+                list(future_to_index),
+                timeout=None if block else 0.0,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                return
+            for fut in done:
+                record_index = future_to_index.pop(fut)
+                try:
+                    judgment = fut.result()
+                except Exception as exc:
+                    judgment = {
+                        "score": None,
+                        "failure_mode": "judge_error",
+                        "reason": str(exc),
+                        "raw_judge": f"ERROR: {exc}",
+                    }
+                judge_calls_done += 1
+                if judgment.get("score") in {0, 1}:
+                    judge_valid += 1
+                else:
+                    judge_invalid += 1
+                judgments = pending_judgments[record_index]
+                judgments.append(judgment)
+                if len(judgments) == args.judge_repeats:
+                    record = records_by_index.pop(record_index)
+                    record.update(collapse_judgments(judgments))
+                    completed_records[record_index] = record
+                    del pending_judgments[record_index]
+                    stream_record(record)
+            if not block:
+                return
+
+    try:
+        with ThreadPoolExecutor(max_workers=args.judge_max_workers) as judge_ex:
+            for batch_index, start in enumerate(range(0, total_records, args.gen_batch_size), start=1):
+                batch_prompts = suffix_prompts[start : start + args.gen_batch_size]
+                input_ids, attn, max_len = pad_left(tokenizer, batch_prompts, device)
+                out = model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attn,
+                    max_new_tokens=args.suffix_tokens,
+                    do_sample=True,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+                batch_records = prompt_records[start : start + len(batch_prompts)]
+                for record, seq in zip(batch_records, out.tolist()):
+                    predicted_suffix = decode(tokenizer, seq[max_len:]).strip()
+                    record = {
+                        **record,
+                        "predicted_suffix": predicted_suffix,
+                        "predicted_suffix_words": word_count(predicted_suffix),
+                        "suffix_tokens": len(seq[max_len:]),
+                    }
+                    record_index = int(record["record_index"])
+                    records_by_index[record_index] = record
+                    pending_judgments[record_index] = []
+                    judge_prompt = JUDGE_PROMPT.format(
+                        prefix=record["prefix_text"][: args.max_judge_chars],
+                        thought=record["thought_text"][: args.max_judge_chars],
+                        reference=record["reference_text"][: args.max_judge_chars],
+                        candidate=predicted_suffix[: args.max_judge_chars],
+                    )
+                    for _ in range(args.judge_repeats):
+                        fut = judge_ex.submit(
+                            judge_one,
+                            judge_prompt,
+                            judge_cfg["endpoint"],
+                            judge_cfg["model_name"],
+                            judge_cfg["temperature"],
+                            judge_cfg["top_p"],
+                            judge_cfg["max_tokens"],
+                            60.0,
+                            judge_cfg["retries"],
+                            judge_cfg["response_format_json"],
+                            judge_cfg["enable_thinking"],
+                        )
+                        future_to_index[fut] = record_index
+
+                generated = min(start + len(batch_prompts), total_records)
+                if batch_index == 1 or batch_index % args.progress_every_batches == 0 or generated == total_records:
+                    elapsed = max(1e-6, time.time() - start_time)
+                    rate = generated / elapsed
+                    remaining = max(0, total_records - generated)
+                    eta = remaining / rate if rate > 0 else None
+                    print(
+                        json.dumps(
+                            {
+                                "stage": f"{condition}:suffix_generation",
+                                "event": "progress",
+                                "batch": batch_index,
+                                "total_batches": total_batches,
+                                "generated": generated,
+                                "total": total_records,
+                                "pending_judge_records": len(pending_judgments),
+                                "pending_judge_calls": len(future_to_index),
+                                "rate_samples_per_min": rate * 60.0,
+                                "eta_minutes": eta / 60.0 if eta is not None else None,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+
+                drain_judges(block=False)
+                while len(pending_judgments) >= args.max_pending_judge_records:
+                    drain_judges(block=True)
+
+            while future_to_index:
+                drain_judges(block=True)
+    finally:
+        if out_f is not None:
+            out_f.close()
+
+    print(
+        json.dumps(
+            {
+                "stage": f"{condition}:pipeline",
+                "event": "complete",
+                "records": len(completed_records),
+                "judge_calls_done": judge_calls_done,
+                "judge_valid": judge_valid,
+                "judge_invalid": judge_invalid,
+                "invalid_rate": judge_invalid / max(1, judge_calls_done),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    return [completed_records[idx] for idx in sorted(completed_records)]
 
 
 def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
@@ -650,6 +944,12 @@ def main() -> None:
     parser.add_argument("--judge-repeats", type=int, default=3)
     parser.add_argument("--judge-retries", type=int, default=1)
     parser.add_argument("--max-judge-chars", type=int, default=2000)
+    parser.add_argument("--judge-response-format-json", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--judge-enable-thinking", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--progress-every-batches", type=int, default=10)
+    parser.add_argument("--judge-progress-every", type=int, default=256)
+    parser.add_argument("--record-progress-every", type=int, default=256)
+    parser.add_argument("--max-pending-judge-records", type=int, default=128)
     parser.add_argument("--conditions", nargs="+", default=DEFAULT_CONDITIONS)
     parser.add_argument("--bootstrap-rounds", type=int, default=1000)
     parser.add_argument("--min-prefixes", type=int, default=64)
@@ -695,6 +995,8 @@ def main() -> None:
         "max_workers": args.judge_max_workers,
         "repeats": args.judge_repeats,
         "retries": args.judge_retries,
+        "response_format_json": args.judge_response_format_json,
+        "enable_thinking": args.judge_enable_thinking,
     }
     summary: dict[str, Any] = {
         "output_dir": str(out_dir),
@@ -725,13 +1027,24 @@ def main() -> None:
                 args.temperature,
                 args.top_p,
                 device,
+                progress_label=condition,
+                progress_every_batches=args.progress_every_batches,
             )
         else:
             thoughts = build_static_thoughts(eval_rows, condition, args.samples_per_prefix, args.seed)
-        records = evaluate_condition(model, tokenizer, eval_rows, condition, thoughts, args, judge_cfg, device)
-        records_by_condition[condition] = records
         records_path = out_dir / f"{condition}.jsonl"
-        write_jsonl(records_path, records)
+        records = evaluate_condition(
+            model,
+            tokenizer,
+            eval_rows,
+            condition,
+            thoughts,
+            args,
+            judge_cfg,
+            device,
+            records_path=records_path,
+        )
+        records_by_condition[condition] = records
         summary["conditions"][condition] = summarize_records(records) | {"records_path": str(records_path)}
         (out_dir / "summary.partial.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
