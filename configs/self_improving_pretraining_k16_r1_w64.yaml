@@ -1,0 +1,49 @@
+include: configs/self_improving_pretraining.yaml
+
+# Paper-parity SIP run at Spark scale:
+# K=16 policy rollouts, full pairwise judge comparisons, Online DPO.
+# The key runtime reduction versus the broad scaled config is one judge vote per
+# pair and no gradient accumulation, not a change to the K=16/full-pairwise
+# training object.
+
+train:
+  condition: online_dpo_selfimproving
+  init_from_pretrained: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
+  output_dir: outputs/self_improving_pretraining_k16_r1_w64
+  max_steps: 2000
+  eval_every: 100
+  log_every: 1
+  save_every: 100
+  learning_rate: 0.000005
+  warmup_steps: 100
+  min_lr_ratio: 0.1
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  batch_size: 4
+  grad_accum_steps: 1
+  dpo_beta: 0.1
+  num_rollouts: 16
+
+data:
+  tokenizer_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
+  config_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
+  examples_jsonl: outputs/sip_paper_parity_data/train32768_val512.jsonl
+  raw_examples_jsonl: outputs/sip_paper_parity_data/train32768_val512.jsonl
+  online_dpo_examples_jsonl: outputs/sip_paper_parity_data/train32768_val512.jsonl
+  prefix_tokens: 384
+  suffix_tokens: 128
+  min_source_tokens: 640
+
+selection:
+  judge_endpoint: http://192.168.100.11:30000
+  judge_model: qwen35_35b_a3b_dflash_32768
+  prompt_path: prompts/judge_quality.txt
+  prompt_version: quality_v1
+  judge_repeats: 1
+  judge_temperature: 0.7
+  judge_top_p: 0.6
+  judge_max_tokens: 64
+  judge_retries: 2
+  judge_max_workers: 64
+  rollout_temperature: 1.0
+  rollout_top_p: 1.0
