@@ -27,9 +27,9 @@ train:
 data:
   tokenizer_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
   config_repo_cache: /hf/hub/models--Qwen--Qwen3.5-0.8B-Base
-  examples_jsonl: outputs/sip_paper_parity_data/train32768_val512.jsonl
-  raw_examples_jsonl: outputs/sip_paper_parity_data/train32768_val512.jsonl
-  online_dpo_examples_jsonl: outputs/sip_paper_parity_data/train32768_val512.jsonl
+  examples_jsonl: data/processed/pretraining_examples.jsonl
+  raw_examples_jsonl: data/processed/pretraining_examples.jsonl
+  online_dpo_examples_jsonl: data/processed/pretraining_examples.jsonl
   prefix_tokens: 384
   suffix_tokens: 128
   min_source_tokens: 640

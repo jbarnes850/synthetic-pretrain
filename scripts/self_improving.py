@@ -45,6 +45,31 @@ def parse_winner(content: str) -> str:
     return "B"
 
 
+def _stringify_message_field(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", item.get("content", item))))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    return str(value)
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    fields = (
+        message.get("content"),
+        message.get("reasoning_content"),
+        message.get("reasoning"),
+    )
+    return "\n".join(text for text in (_stringify_message_field(field) for field in fields) if text)
+
+
 def _judge_call(
     prompt: str,
     endpoint: str,
@@ -68,7 +93,10 @@ def _judge_call(
         try:
             response = requests.post(url, json=payload, timeout=timeout)
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+            message = response.json()["choices"][0]["message"]
+            content = _message_text(message)
+            if not content.strip():
+                raise ValueError("judge response message had no content or reasoning_content")
             return parse_winner(content)
         except Exception as exc:
             last_err = exc
