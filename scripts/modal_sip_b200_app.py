@@ -404,6 +404,9 @@ def run_rlmt_b200(
     steps: int,
     run_id: str,
     judge_workers: int = 64,
+    row_offset: int = 0,
+    eval_every: int = 100,
+    save_every: int = 100,
     judge_fp8_kv_cache: bool = False,
 ) -> str:
     """Run the self-improved RLMT arm after reward-variance/oracle gates pass."""
@@ -439,6 +442,12 @@ def run_rlmt_b200(
                 str(steps),
                 "--prefixes-per-step 4",
                 "--samples-per-prefix 16",
+                "--row-offset",
+                str(row_offset),
+                "--eval-every",
+                str(eval_every),
+                "--save-every",
+                str(save_every),
                 "--judge-max-workers",
                 str(judge_workers),
                 "--enforce-stop-conditions",
@@ -457,6 +466,9 @@ def main(
     steps: int = 25,
     confirm_spend: bool = False,
     judge_workers: int = 64,
+    rlmt_row_offset: int = 0,
+    rlmt_eval_every: int = 100,
+    rlmt_save_every: int = 100,
     judge_fp8_kv_cache: bool = False,
     output_suffix: str = "full",
     run_id: str | None = None,
@@ -497,6 +509,9 @@ def main(
                 steps=steps,
                 run_id=resolved,
                 judge_workers=judge_workers,
+                row_offset=rlmt_row_offset,
+                eval_every=rlmt_eval_every,
+                save_every=rlmt_save_every,
                 judge_fp8_kv_cache=judge_fp8_kv_cache,
             )
         )

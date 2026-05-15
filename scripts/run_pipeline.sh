@@ -217,7 +217,9 @@ case "${STAGE}" in
       --arm think_base \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --steps "${RLMT_STEPS:-1000}" --prefixes-per-step "${RLMT_PREFIXES_PER_STEP:-4}" \
-      --samples-per-prefix 16 --enforce-stop-conditions" \
+      --samples-per-prefix 16 --row-offset "${RLMT_ROW_OFFSET:-0}" \
+      --eval-every "${RLMT_EVAL_EVERY:-100}" --save-every "${RLMT_SAVE_EVERY:-100}" \
+      --enforce-stop-conditions" \
       2>&1 | tee "logs/${RUN_ID}-rlmt-base.log"
     ;;
   rlmt-self-improved)
@@ -226,7 +228,9 @@ case "${STAGE}" in
       --arm think_self_improved \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --steps "${RLMT_STEPS:-1000}" --prefixes-per-step "${RLMT_PREFIXES_PER_STEP:-4}" \
-      --samples-per-prefix 16 --enforce-stop-conditions" \
+      --samples-per-prefix 16 --row-offset "${RLMT_ROW_OFFSET:-0}" \
+      --eval-every "${RLMT_EVAL_EVERY:-100}" --save-every "${RLMT_SAVE_EVERY:-100}" \
+      --enforce-stop-conditions" \
       2>&1 | tee "logs/${RUN_ID}-rlmt-self-improved.log"
     ;;
   rlmt-cpt)
@@ -235,7 +239,9 @@ case "${STAGE}" in
       --arm think_cpt \
       --judge-endpoint "${JUDGE_ENDPOINT}" --judge-model "${JUDGE_MODEL}" \
       --steps "${RLMT_STEPS:-1000}" --prefixes-per-step "${RLMT_PREFIXES_PER_STEP:-4}" \
-      --samples-per-prefix 16 --enforce-stop-conditions" \
+      --samples-per-prefix 16 --row-offset "${RLMT_ROW_OFFSET:-0}" \
+      --eval-every "${RLMT_EVAL_EVERY:-100}" --save-every "${RLMT_SAVE_EVERY:-100}" \
+      --enforce-stop-conditions" \
       2>&1 | tee "logs/${RUN_ID}-rlmt-cpt.log"
     ;;
   smoke-rlmt)

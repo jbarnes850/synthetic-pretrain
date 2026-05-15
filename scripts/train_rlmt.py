@@ -353,7 +353,7 @@ def main() -> None:
     parser.add_argument("--judge-model", default="qwen36-35b-a3b")
     parser.add_argument("--seed", type=int, default=4337)
     parser.add_argument("--rl-split", choices=["train", "val"], default="train")
-    parser.add_argument("--row-offset", type=int, default=4096)
+    parser.add_argument("--row-offset", type=int, default=0)
     parser.add_argument("--steps", type=int, default=25)
     parser.add_argument("--samples-per-prefix", type=int, default=16)
     parser.add_argument("--prefixes-per-step", type=int, default=2)
@@ -375,8 +375,8 @@ def main() -> None:
         default=0,
         help="Fixed Dr. GRPO loss denominator. Defaults to thought_max_new_tokens + suffix_tokens.",
     )
-    parser.add_argument("--eval-every", type=int, default=5)
-    parser.add_argument("--save-every", type=int, default=5)
+    parser.add_argument("--eval-every", type=int, default=100)
+    parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--judge-temperature", type=float, default=0.7)
     parser.add_argument("--judge-top-p", type=float, default=0.6)
     parser.add_argument("--judge-max-tokens", type=int, default=64)
